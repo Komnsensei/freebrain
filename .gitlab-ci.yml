@@ -19,6 +19,16 @@ stages:
   - verify
   - drift
 
+# Do not create a pipeline at all when no job could run. Branch pushes (how the
+# residence is persisted) match neither job's rules, and GitLab still reports
+# such a pipeline as *failed* with zero jobs — red X's that mean "nothing to do"
+# and train you to ignore the CI column.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - when: always
+
 variables:
   # --- the loop ---
   DRIFT_MODEL: "qwen2.5-coder:3b"
@@ -169,9 +179,13 @@ smoke:
   image: ubuntu:24.04
   # Same group as `drift`: never two loops — or two 2 GB model pulls — at once.
   resource_group: freebrain-drift
+  # `$SMOKE` is the ONLY condition, deliberately. An earlier revision also
+  # excluded `schedule`-source pipelines here (to keep smoke out of scheduled
+  # drift runs) — but the smoke run IS a schedule, so this job excluded itself,
+  # the drift job excluded itself through its own SMOKE rule, and the pipeline
+  # produced ZERO jobs with no error. Set SMOKE only on the smoke schedule; the
+  # drift schedule simply does not have the variable, so smoke stays out of it.
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
     - if: '$SMOKE == "1"'
   cache:
     key: "ollama-$DRIFT_MODEL"
