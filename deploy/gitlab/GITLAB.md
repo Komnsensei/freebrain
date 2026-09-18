@@ -71,6 +71,41 @@ This is not a plan; it is the state of the account.
 project created, branch pushed, variable created, schedule created — so it is
 idempotent and safe to re-run.
 
+### Status: blocked on identity verification (2026-09-18)
+
+Everything needed is in place and verified by API. **The pipelines still produce
+zero jobs.**
+
+The signature: the pipeline is created and fails in the *same millisecond* —
+`status=failed`, `jobs: 0`, `yaml_errors: null`, `failure_reason: null`.
+
+It is not the config. A throwaway branch (`ci-probe`) carrying a **single job
+with no rules and no variables** — just `echo` — also produced zero jobs, which
+rules out the YAML, the rules and the runner tag. It is GitLab's **identity
+verification** requirement:
+
+> Depending on your risk score, you might be required to perform up to three
+> stages of verification … All users - Email verification. Medium-risk users -
+> Phone number verification. High-risk users - Credit card verification.
+> — <https://docs.gitlab.com/security/identity_verification/>
+
+Email is confirmed; the account has never been **phone-verified**. Free accounts
+do not get shared runners until verification completes, so:
+
+1. User settings → **Account** → add and verify a **phone number** (a one-time
+   code; no card).
+2. Re-play the smoke schedule below. It should now produce a `smoke` job.
+
+> If phone verification is unavailable in your country — GitLab documents
+> several as "unsupported" or "partial" — the only remaining route is credit
+> card verification, which GitLab states is neither stored nor charged. That is
+> where this path stops being card-free, and it is better to know that before
+> spending an evening on it.
+
+**Card-free alternatives with no identity gate:** the phone itself (already
+running the study), or any machine you control — the harness is stdlib-only and
+the residence is portable, so a host is swappable, not a dependency.
+
 **The schedule is paused deliberately.** The phone is at **cycle 66**; the pushed
 branch is a snapshot at **cycle 42**. Triggering a run now would start a *second*
 lineage from cycle 43 and diverge from the phone's record — and two lineages

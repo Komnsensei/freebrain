@@ -2,7 +2,7 @@
 
 **Epistemic Status:** Experimental / Frontier R&D Framework
 **Target Domain:** Open-Weight Autonomous Agent Synthesis & Decentralized Cognitive Routing
-**Status:** research/design — rev 0.9 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 37+ cycles on phone-class hardware, coherence 1.00, sticky (not frozen) graph hash; Q1 throughput **corrected** — 0.13 tok/s was contention, ~6.3 tok/s measured idle (§1 correction); **Q1 evidence log audited** — 98% of its rows were test artifacts, leak closed and rows quarantined (`evidence_hygiene.py`, `test_support.py`); **P6 runtime** — three deployment paths: always-on Oracle kit (`deploy/oracle/`), a card-free GitLab CI pipeline (`.gitlab-ci.yml` + `deploy/gitlab/`), and a phone watchdog (`deploy/phone/`); GitHub Actions blocked by an account billing lock, see §9)
+**Status:** research/design — rev 0.9 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 37+ cycles on phone-class hardware, coherence 1.00, sticky (not frozen) graph hash; Q1 throughput **corrected** — 0.13 tok/s was contention, ~6.3 tok/s measured idle (§1 correction); **Q1 evidence log audited** — 98% of its rows were test artifacts, leak closed and rows quarantined (`evidence_hygiene.py`, `test_support.py`); **P6 runtime** — three deployment paths: always-on Oracle kit (`deploy/oracle/`), a card-free GitLab CI pipeline (`.gitlab-ci.yml` + `deploy/gitlab/`), and a phone watchdog (`deploy/phone/`); both card-free CI paths terminate at account-level identity gates — a GitHub billing lock and GitLab identity verification — see §9)
 
 This document is the full decomposition of the research brief. It is written to be
 honest about what is established, what is plausible, and what is speculative — the
@@ -775,15 +775,35 @@ residence to Drive every 5 minutes, so the memory outlives the machine and the
 drift curve is readable from the phone. Runbook: `deploy/oracle/ORACLE.md`
 (requires a card at signup).
 
-**Card-free P6 runtime — GitLab (rev 0.9).** GitHub Actions turned out to be
-unusable for a reason unrelated to this project: every job is refused with
-*"your account is locked due to a billing issue"*, account-wide, even on public
-repos where the minutes are free. The evidence that it is not a debt: all 9 prior
-runs concluded `startup_failure` with **0 minutes consumed** — the known stale
-failed-authorization-hold state. `.gitlab-ci.yml` (runbook `deploy/gitlab/GITLAB.md`)
-is the same design on GitLab's free tier, which needs no card: 400 compute minutes/month, scheduled pipelines supported, model cached
-between jobs. A full 1,000-cycle study is bracketed at ~150–200 minutes, so it
-fits inside one month's allowance.
+**Card-free P6 runtime — GitLab (rev 0.9, blocked at the account level).** GitHub
+Actions turned out to be unusable for a reason unrelated to this project: every
+job is refused with *"your account is locked due to a billing issue"*,
+account-wide, even on public repos where the minutes are free. The evidence that
+it is not a debt: all 9 prior runs concluded `startup_failure` with **0 minutes
+consumed** — the known stale failed-authorization-hold state. `.gitlab-ci.yml`
+(runbook `deploy/gitlab/GITLAB.md`) is the same design on GitLab's free tier,
+which advertises no card: 400 compute minutes/month, scheduled pipelines
+supported, model cached between jobs. A full 1,000-cycle study is bracketed at
+~150–200 minutes, so it fits inside one month's allowance.
+
+**The same gate exists there.** Setting the project up end-to-end — token,
+project, branch, masked variable, schedule, all confirmed by API — produced
+pipelines that fail in the *same millisecond* with **zero jobs**. The config is
+not the cause: a throwaway branch carrying a **single rule-free `echo` job** also
+produced zero jobs, which rules out the YAML, the rules and the runner tag. It is
+GitLab's identity verification, documented as up to three stages graded by risk
+score — email (complete), **phone OTP**, and for high-risk accounts a credit card
+(GitLab states it neither stores the card nor makes charges). New accounts do not
+get shared runners until it finishes. So **both** card-free CI paths terminate at an account-level identity
+gate, for one common reason: free compute is exactly what hosting providers
+guard this way. That is a fact about the vendors, not about the design — the
+harness runs anywhere, and the phone already runs it.
+
+Two real defects were found and fixed on the way, neither visible to reading:
+a root-level `resource_group:` key that made **every** pipeline produce zero
+jobs, and a smoke job whose own rules excluded every pipeline that could have
+run it. `setup.sh` now lints against GitLab's `/ci/lint` before anything depends
+on the config — a local syntax check passed both times.
 
 **The GitHub Actions pipeline (rev 0.8).** `.github/workflows/drift-runner.yml`,
 runbook `deploy/actions/GITHUB-ACTIONS.md` — kept in the repo because it becomes
