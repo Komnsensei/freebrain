@@ -27,6 +27,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import agent_runtime
 import brain_cascade
+
+# The default residence is relative to the cwd, so without this a suite run from
+# the repo root appends its stub records to the PUBLISHED evidence log. See
+# test_support.py — 58% of q1-evidence.jsonl was test artifacts before this.
+import test_support
+test_support.isolate_residence()
 from agent_runtime import (
     QIH_ACTIVATION_COMMAND,
     QIH_INSTANCE_NAME,

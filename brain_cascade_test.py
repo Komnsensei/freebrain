@@ -22,6 +22,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import brain_cascade as bc
 
+# Never write the shipped residence from a test (see test_support.py).
+import test_support
+test_support.isolate_residence()
+
 
 def _config(**over):
     cfg = {

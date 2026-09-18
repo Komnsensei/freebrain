@@ -2,7 +2,7 @@
 
 **Epistemic Status:** Experimental / Frontier R&D Framework
 **Target Domain:** Open-Weight Autonomous Agent Synthesis & Decentralized Cognitive Routing
-**Status:** research/design — rev 0.9 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 37+ cycles on phone-class hardware, coherence 1.00, sticky (not frozen) graph hash; Q1 throughput **corrected** — 0.13 tok/s was contention, ~6.3 tok/s measured idle (§1 correction); **P6 runtime** — three deployment paths: always-on Oracle kit (`deploy/oracle/`), a card-free GitLab CI pipeline (`.gitlab-ci.yml` + `deploy/gitlab/`), and a phone watchdog (`deploy/phone/`); GitHub Actions blocked by an account billing lock, see §9)
+**Status:** research/design — rev 0.9 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 37+ cycles on phone-class hardware, coherence 1.00, sticky (not frozen) graph hash; Q1 throughput **corrected** — 0.13 tok/s was contention, ~6.3 tok/s measured idle (§1 correction); **Q1 evidence log audited** — 98% of its rows were test artifacts, leak closed and rows quarantined (`evidence_hygiene.py`, `test_support.py`); **P6 runtime** — three deployment paths: always-on Oracle kit (`deploy/oracle/`), a card-free GitLab CI pipeline (`.gitlab-ci.yml` + `deploy/gitlab/`), and a phone watchdog (`deploy/phone/`); GitHub Actions blocked by an account billing lock, see §9)
 
 This document is the full decomposition of the research brief. It is written to be
 honest about what is established, what is plausible, and what is speculative — the
@@ -113,6 +113,20 @@ result — the drift loop's own per-step evidence, in cycle order:
 monotonically over the first cycles rather than sitting flat, which is what a
 warm model and a settled page cache look like — not a hardware wall.
 
+**Re-cut over the whole clean log** (104 measurements, not the six cited above):
+
+| Regime | Rows | Median | Best | Worst |
+| --- | --- | --- | --- | --- |
+| 2026-09-09, contended (graph + rewrite) | 67 | 0.13 tok/s | 11.9 | 0.08 |
+| 2026-09-18, idle — graph | 11 | 2.65 tok/s | 5.0 | 0.53 |
+| 2026-09-18, idle — rewrite | 10 | 5.24 tok/s | 7.58 | 3.47 |
+
+Note the **11.9 tok/s row on 2026-09-09 itself** — the contended day's very first
+cycle. The phone could reach that rate on the day it spent nine hours at 0.13
+(#1), which is the clearest single indication that the low figure was load, not
+a ceiling. It is one row, so it is a hint rather than a result — but it points
+the same way as the rest.
+
 **What this changes.** The earlier conclusion ("local inference on this device is
 physically unusable; Q1 needs other hardware") was **too strong**, and it was
 drawn from a single contended measurement. The honest statement is narrower and
@@ -128,19 +142,63 @@ recorded, and it took a re-run to notice. The lesson generalises — a throughpu
 number is a measurement *of a rig under load*, and belongs in the record with
 its conditions attached.
 
+#### Data hygiene (2026-09-18) — 98% of the "evidence log" was not evidence
+
+Auditing this file before publishing it found a defect in the record itself. The
+evidence log resolved its default path **relative to the current working
+directory**, so any test suite run from the repo root appended its stub-provider
+records to the published log. Measured:
+
+| | Rows | Share |
+| --- | --- | --- |
+| Total | 5,894 | — |
+| **Test artifacts** | **5,790** | **98.2%** |
+| Measurements | 104 | 1.8% |
+
+The artifacts did not obviously look wrong: the stubs report `provider: "local"`
+with a plausible `tokens_per_s` (160 tok/s from an in-process stub), so a reader
+or a script would have averaged them in without warning. Any throughput figure
+taken over that file was fiction. The leak ran from 2026-09-10 to 2026-09-18 and
+accelerated — 2,455 rows on 09-17 alone — as the suites grew.
+
+Two fixes, both in the harness rather than in this document:
+
+- **`test_support.py`** — each suite points the default residence at a temp dir at
+  import time, so a test *cannot* write the shipped record. Verified: all four
+  suites run, the record gains **0 rows**, and the temp home is cleaned up at exit.
+- **`evidence_hygiene.py`** — reports and quarantines existing artifacts. It marks
+  a row as an artifact only on **positively identified stub markers** (a `stub`
+  provider, a test-only endpoint, a test-only model id), and deliberately does
+  *not* treat "an endpoint I don't recognise" as an artifact — a future real
+  backend must never be silently discarded. 10/10 classification cases tested,
+  including an unknown real backend and an unlisted local port.
+
+Quarantine is a **move, not a delete**: the 5,790 rows are preserved in
+`evidence/test-artifacts.jsonl`, the counts close exactly (104 + 5,790 = 5,894),
+re-running `--split` is a no-op, and the line sets are byte-for-byte identical
+before and after. **56 rows are flagged for review**: they carry
+`provider: "stub"` against the *real* Ollama endpoint, so the provider field says
+artifact while the endpoint says measurement — 54 have a stub model (clearly
+artifacts) and 2 name `qwen2.5-coder:3b` (genuinely ambiguous, so quarantined
+conservatively rather than silently kept).
+
+All Q1 figures in this document are computed from the 104 measurements only.
+
 **Auto-capture (rev 0.4):** `agent_runtime.py` now records throughput on every
 model step instead of relying on hand timing. Each `--goal` step (and each
 `--chat`) prints a `[perf]` line to stderr and appends one JSONL record to
-`q1-evidence.jsonl` (repo root; `EVIDENCE_FILE=""` disables the write, any other
-path redirects it). Record schema: `ts, run, provider, provider_url,
+`<residence>/evidence/q1-evidence.jsonl` — inside `DRIVE_RESIDENCE` (default
+`freebrain-residence`), **not** the repo root; `EVIDENCE_FILE=""` disables the
+write and any other path redirects it. Record schema: `ts, run, provider, provider_url,
 provider_key, failovers, model, url, step, kind (tool|final|chat), tokens,
 elapsed_s, tokens_per_s, early_stop` — where `provider_key` is the *env var
 name* whose credential served the call (never the key value). Tokens are
 counted from streamed SSE chunks (one per token on Ollama/vLLM/llama.cpp), so an
 early-stopped step reports exactly the tokens generated up to the cut; when the
-server sends a final `usage` chunk its exact `completion_tokens` wins. A future
-run on capable hardware can therefore regenerate this table directly from
-`q1-evidence.jsonl` — the file is the raw material, this table is the view.
+server sends a final `usage` chunk its exact `completion_tokens` wins.A future run on capable hardware can therefore regenerate this table directly from
+`q1-evidence.jsonl` — the file is the raw material, this table is the view. Run
+`python3 evidence_hygiene.py` first if the log predates 2026-09-18 (see the data
+hygiene note above); it prints the split before touching anything.
 
 **Cascade attribution (rev 0.6):** `provider` and `provider_url` name the model
 backend that actually served the step, and `failovers` lists every hop that

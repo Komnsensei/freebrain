@@ -28,6 +28,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent_runtime
 import loop_guard
 
+# Never write the shipped residence from a test (see test_support.py).
+import test_support
+test_support.isolate_residence()
+
 
 def guard(max_steps=8, enabled=True, emit=False, thresholds=None, log_path=None,
           ledger_path=None):

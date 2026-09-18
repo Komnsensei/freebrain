@@ -16,6 +16,7 @@
 # one month's allowance.
 
 stages:
+  - verify
   - drift
 
 variables:
@@ -49,6 +50,10 @@ drift:
   # Raise this in Settings > CI/CD > General pipelines > Timeout if your plan
   # allows longer jobs; then raise DRIFT_MAX_SECONDS to match (leave ~10 min).
   rules:
+    # A SMOKE pipeline must have zero side effects on the record — that is the
+    # whole reason it exists (see the `smoke` job below).
+    - if: '$SMOKE == "1"'
+      when: never
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "web"'
   cache:
@@ -134,4 +139,105 @@ drift:
       - freebrain-residence/ledger.jsonl
       - freebrain-residence/state.json
       - freebrain-residence/evidence/
+      - ollama.log
+
+# ─────────────────────────────────────────────────────────────────────────────
+# smoke — "does this runner actually work?", with no effect on the record.
+#
+# WHY: on GitHub Actions the failure was ACCOUNT-level (a billing lock that
+# blocked every job). From inside the repository that is indistinguishable from
+# a broken workflow, so the question worth answering first is not "is our YAML
+# right" but "does a job start here at all".
+#
+# RUN IT: CI/CD → Pipelines → Run pipeline, add variable SMOKE=1.
+#
+# It never writes freebrain-residence. The one real loop run it does happens
+# against a COPY in /tmp (DRIVE_RESIDENCE is what selects the residence), and
+# the job asserts the tracked record is byte-identical afterwards — a smoke run
+# must be incapable of forking the drift lineage.
+# ─────────────────────────────────────────────────────────────────────────────
+smoke:
+  stage: verify
+  timeout: 1h
+  image: ubuntu:24.04
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: '$SMOKE == "1"'
+  cache:
+    key: "ollama-$DRIFT_MODEL"
+    paths:
+      - .ollama/
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl ca-certificates python3 git >/dev/null
+  script:
+    - |
+      echo "── the runner ──"
+      echo "host   : $(nproc) vCPU / $(free -g | awk '/^Mem:/{print $2}') GB RAM / $(df -h . | awk 'NR==2{print $4}') free"
+      echo "python : $(python3 -V)"
+      echo "uid    : $(id -u) (root is needed to install ollama)"
+      echo "trigger: source=$CI_PIPELINE_SOURCE ref=$CI_COMMIT_REF_NAME"
+    - |
+      echo "── egress + ollama install ──"
+      curl -fsSL https://ollama.com/install.sh | sh
+      nohup ollama serve > ollama.log 2>&1 &
+      for i in $(seq 1 60); do
+        curl -fsS -m 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
+        [ "$i" = 60 ] && { echo "ollama never came up"; cat ollama.log; exit 1; }
+        sleep 1
+      done
+      ollama --version
+      if ollama list | awk '{print $1}' | grep -qx "$DRIFT_MODEL"; then
+        echo "model cache hit — $DRIFT_MODEL"
+      else
+        echo "pulling $DRIFT_MODEL (this also warms the cache for the real run)"
+        ollama pull "$DRIFT_MODEL"
+      fi
+    - |
+      echo "── the persist credential ──"
+      # The real run is only as good as its ability to push the residence back.
+      if [ -n "${GITLAB_PUSH_TOKEN:-}" ]; then
+        if git ls-remote "https://oauth2:${GITLAB_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" HEAD >/dev/null 2>&1; then
+          echo "GITLAB_PUSH_TOKEN can reach the repo — runs will be able to persist"
+        else
+          echo "GITLAB_PUSH_TOKEN is set but cannot reach the repo"; exit 1
+        fi
+      else
+        echo "GITLAB_PUSH_TOKEN is not set on this project"
+        echo "(runs still work — they commit locally and keep artifacts)"
+      fi
+    - |
+      echo "── harness self-tests ──"
+      fail=0
+      for t in agent_runtime_test.py drift_loop_test.py brain_cascade_test.py loop_guard_test.py; do
+        # Capture first: piping into `tail` would make the exit status tail's,
+        # so a failing suite would report green.
+        out=$(python3 "$t" 2>&1); rc=$?
+        echo "$out" | tail -2
+        [ "$rc" = 0 ] || { echo "FAILED: $t (exit $rc)"; fail=1; }
+      done
+      [ "$fail" = 0 ] || { echo "a suite failed on this runner"; exit 1; }
+    - |
+      echo "── a real loop run, against a copy ──"
+      rm -rf /tmp/smoke-residence
+      cp -r "$DRIVE_RESIDENCE" /tmp/smoke-residence
+      export DRIVE_RESIDENCE=/tmp/smoke-residence
+      export EVIDENCE_FILE=/tmp/smoke-residence/evidence/q1-evidence.jsonl
+      python3 -u drift_loop.py --cycles 3 --max-seconds 900
+      echo "smoke residence reached cycle $(python3 -c "import json;print(json.load(open('/tmp/smoke-residence/state.json'))['cycle'])")"
+      echo "smoke ledger lines: $(wc -l < /tmp/smoke-residence/ledger.jsonl)"
+    - |
+      echo "── the record must be untouched ──"
+      if [ -n "$(git status --porcelain -- freebrain-residence)" ]; then
+        echo "freebrain-residence CHANGED — a smoke run must not fork the drift lineage"
+        git status --porcelain -- freebrain-residence
+        exit 1
+      fi
+      echo "freebrain-residence is byte-identical to the committed record"
+      echo "smoke OK — this runner can run the loop"
+  artifacts:
+    when: always
+    expire_in: 7 days
+    paths:
       - ollama.log

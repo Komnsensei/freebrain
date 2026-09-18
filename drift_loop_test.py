@@ -33,6 +33,10 @@ from drift_loop import (
 )
 from agent_runtime import load_config
 
+# Never write the shipped residence from a test (see test_support.py).
+import test_support
+test_support.isolate_residence()
+
 GOOD_GRAPH = {
     "graph": [
         {"step": 1, "action": "list_dir", "target": "."},

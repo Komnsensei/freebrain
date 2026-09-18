@@ -53,6 +53,66 @@ between jobs.
 
 ---
 
+## Live setup — completed 2026-09-18
+
+This is not a plan; it is the state of the account.
+
+| | |
+|---|---|
+| Project | <https://gitlab.com/Komnsensei/freebrain> (public) |
+| Project id | `86614316` (needed for API calls) |
+| Default branch | `main` |
+| `GITLAB_PUSH_TOKEN` | set, **masked** — runs can persist the residence |
+| Schedule | `0 */6 * * *` UTC, id `4448457`, **paused on purpose** |
+| Shared runners | enabled; job timeout 1 h (`build_timeout: 3600`) |
+
+`deploy/gitlab/setup.sh` did all of that in a single run — token verified,
+project created, branch pushed, variable created, schedule created — so it is
+idempotent and safe to re-run.
+
+**The schedule is paused deliberately.** The phone is at **cycle 66**; the pushed
+branch is a snapshot at **cycle 42**. Triggering a run now would start a *second*
+lineage from cycle 43 and diverge from the phone's record — and two lineages
+cannot be merged afterwards. See *Handing off* below for the one-step swap.
+
+### Smoke it before trusting it
+
+The GitHub failure was **account-level**, and from inside a repository that looks
+exactly like a broken pipeline. So the question worth answering first is not "is
+our YAML right" but "does a job start here at all". The pipeline has a job for
+that:
+
+1. **CI/CD → Pipelines → Run pipeline**
+2. Add variable `SMOKE` = `1`
+3. Run
+
+It reports the runner spec, installs Ollama, pulls (and *caches*) the model,
+verifies `GITLAB_PUSH_TOKEN` can actually reach the repo, runs all four test
+suites, and then runs **three real cycles against a copy of the residence in
+`/tmp`** — `DRIVE_RESIDENCE` is what selects the home, so nothing in the record
+is touched. It closes by asserting the tracked residence is byte-identical, so a
+smoke run is *incapable* of forking the drift lineage. The `drift` job is
+explicitly skipped when `SMOKE=1`.
+
+This also settles the identity-verification caveat above empirically: either the
+job starts, or it does not.
+
+### Handing off from the phone
+
+One host at a time. To move the study from the phone to GitLab:
+
+1. Stop the phone's watchdog (or two writers keep going).
+2. Copy the phone's **current** residence over this repo's, so the branch is
+   ahead of the record rather than behind it.
+3. Commit and push to `main`.
+4. **Then** unpause the schedule (CI/CD → Schedules).
+
+The reverse direction is the same swap. `state.json` is the resume point either
+way, so no cycles are lost in transit — but a *forked* record is not recoverable,
+which is why pausing is the default rather than a suggestion.
+
+---
+
 ## Setup
 
 Only the **account** needs doing by hand — everything after it is one command.
@@ -128,7 +188,8 @@ grinding, and vice versa.
 ## Running it
 
 **Manually:** CI/CD → Pipelines → **Run pipeline** (this is what the `web` rule
-allows).
+allows). To first prove the *runner* works without touching the record, run with
+`SMOKE=1` — see *Smoke it before trusting it* above.
 
 **Watch:** the job log carries the `[perf]` line per step (`tokens`, `elapsed_s`,
 `tok/s`, `early_stop`) and the `[drift] cycle N gate=… coherence=… hash=…`
@@ -163,7 +224,8 @@ Both were caught by testing, and both would have cost a whole run's cycles:
 
 As of 2026-09-18 the loop is live on the phone at **~6–7 tok/s** (not the
 0.13 tok/s originally measured — that figure was contention, not a hardware
-ceiling), i.e. ~15 s/cycle. Two writers on one residence would corrupt the
-ledger, so **run the study on one host at a time**: if the phone is grinding,
-leave the GitLab schedule paused, and vice versa. The residence is portable —
-`state.json` is the resume point either way.
+ceiling), i.e. ~15 s/cycle, and the phone is at **cycle 66**. Two writers on one
+residence would interleave cycles and corrupt the ledger, so **run the study on
+one host at a time**: while the phone is grinding, the GitLab schedule stays
+paused, and vice versa. The residence is portable — `state.json` is the resume
+point either way.
