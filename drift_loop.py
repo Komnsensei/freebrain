@@ -432,6 +432,12 @@ class DriftRun:
         gok, gsig = _gate_graph(g)
         if r1.get("_err"):
             gok, gsig = False, "graph:server-error"
+        elif r1.get("truncated"):
+            # A call cut by the wall-clock budget returned a PARTIAL answer. Gate
+            # it out explicitly: a partial graph must never be hashed and recorded
+            # as a dispatch graph, or the ledger would claim a cycle that did not
+            # actually happen.
+            gok, gsig = False, "graph:budget-exceeded"
         graph_hash = _canonical_hash(g) if gok else None
         trip = self.breaker.record(gsig, gok)
         if trip:
@@ -472,6 +478,12 @@ class DriftRun:
         rok, rsig, retention = _gate_rewrite(rw, self.objective)
         if r2.get("_err"):
             rok, rsig, retention = False, "rewrite:server-error", 0.0
+        elif r2.get("truncated"):
+            # The dangerous case: a truncated rewrite can still retain the
+            # objective anchors, so it would PASS the gates and be written into
+            # instructions.md as an accepted self-edit — the loop silently
+            # mutating itself with a half-sentence. Refuse it first.
+            rok, rsig, retention = False, "rewrite:budget-exceeded", 0.0
         trip = self.breaker.record(rsig, rok)
         if trip:
             self._finish_cycle(c, "rewrite", gok, gsig, graph_hash, retention, 0.0, r1, r2, rsig, trip,

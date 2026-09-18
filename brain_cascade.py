@@ -329,7 +329,7 @@ def provider_model(provider, env=None):
 def local_provider(config):
     """The local OpenAI-compatible server as cascade entry #0. Always present
     when configured — local weights keep priority per FREE-BRAIN.md."""
-    return {
+    entry = {
         "name": "local",
         "url": config["url"],
         "model": config.get("model") or "",
@@ -340,6 +340,12 @@ def local_provider(config):
         "local": True,
         "note": "local open weights (Ollama/vLLM/llama.cpp) — zero cloud calls",
     }
+    # The wall-clock stream budget must reach the hop that does the streaming.
+    # Set only when the caller's config carries one, so hand-built configs in
+    # tests and other callers keep the module default.
+    if config.get("stream_budget_ms") is not None:
+        entry["stream_budget_ms"] = config["stream_budget_ms"]
+    return entry
 
 
 def chain(config, env=None):
@@ -380,6 +386,8 @@ def chain(config, env=None):
                 "local": False,
                 "note": provider.get("note", ""),
             })
+            if config.get("stream_budget_ms") is not None:
+                entries[-1]["stream_budget_ms"] = config["stream_budget_ms"]
     ready, cooling = [], []
     for entry in entries:
         (cooling if cooldown_remaining(entry["name"], env) > 0 else ready).append(entry)

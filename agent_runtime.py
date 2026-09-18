@@ -12,7 +12,10 @@ Config comes from the environment, using the same keys as the Node seam
 
     LOCAL_MODEL_URL   default http://127.0.0.1:11434/v1
     LOCAL_MODEL       default first model the server reports (else "local-model")
-    LOCAL_MODEL_TIMEOUT_MS   default 180000
+    LOCAL_MODEL_TIMEOUT_MS   default 180000  (per-read socket timeout)
+    LOCAL_MODEL_STREAM_BUDGET_MS  default 900000  (total wall-clock cap per call;
+                             0 disables. A per-read timeout cannot bound a stream
+                             that trickles — this is what stops a hung cycle.)
     LOCAL_MODEL_TEMPERATURE  default 0.2
     LOCAL_MODEL_MAX_TOKENS   default 2048
 
@@ -81,6 +84,11 @@ USER_AGENT = "FreeBrain/1.0 (autonomous agent harness; +https://freebuff.com)"
 
 DEFAULT_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_TIMEOUT_MS = 180000
+# Total wall-clock cap for ONE streamed model call. Distinct from
+# DEFAULT_TIMEOUT_MS (a per-read socket timeout): a slow trickle never trips a
+# per-read timeout, which is how a cycle once hung for nine days on a phone.
+# 15 min is generous for a ~100-token cycle and still bounds the damage.
+DEFAULT_STREAM_BUDGET_MS = 900000
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_TOKENS = 2048
 DEFAULT_RESIDENCE = "freebrain-residence"  # the agent's home (FREE-BRAIN.md)
@@ -293,6 +301,7 @@ def load_config(env=None):
         "url": url.rstrip("/"),
         "model": (env.get("LOCAL_MODEL") or "").strip(),
         "timeout_ms": int(env.get("LOCAL_MODEL_TIMEOUT_MS") or DEFAULT_TIMEOUT_MS),
+        "stream_budget_ms": int(env.get("LOCAL_MODEL_STREAM_BUDGET_MS") or DEFAULT_STREAM_BUDGET_MS),
         "temperature": float(env.get("LOCAL_MODEL_TEMPERATURE") or DEFAULT_TEMPERATURE),
         "max_tokens": int(env.get("LOCAL_MODEL_MAX_TOKENS") or DEFAULT_MAX_TOKENS),
     }
@@ -427,14 +436,31 @@ def _chat_stream_single(config, messages, temperature=None, max_tokens=None, tim
         headers=_headers(config),
         method="POST",
     )
+    # `timeout_s` is a PER-READ socket timeout, not a wall-clock budget: a stream
+    # that trickles a token every couple of minutes never trips it. Measured on
+    # phone-class CPU: rewrite calls of 549 s and 594 s against a 300 s timeout.
+    # So bound the whole call as well, and never let a stalled generation hang a
+    # cycle forever.
+    budget_s = config.get("stream_budget_ms", DEFAULT_STREAM_BUDGET_MS) / 1000.0
+    budget_s = budget_s if budget_s > 0 else 0.0  # 0 disables the budget
     content = ""
     token_est = 0
     usage_tokens = None
     early_stop = False
+    truncated = False
     try:
-        resp = urllib.request.urlopen(req, timeout=timeout_s)
+        # cap the socket timeout by the budget so a hard stall can't outlast it
+        resp = urllib.request.urlopen(
+            req, timeout=min(timeout_s, budget_s) if budget_s else timeout_s)
         try:
             while True:
+                if budget_s and (time.time() - started) >= budget_s:
+                    truncated = True
+                    sys.stderr.write(
+                        "[budget] %s stream exceeded %.0fs budget after %d token(s) "
+                        "— aborting the call (result marked truncated)\n"
+                        % (_provider_label(config), budget_s, token_est))
+                    break
                 line = resp.readline()
                 if not line:
                     break
@@ -487,6 +513,11 @@ def _chat_stream_single(config, messages, temperature=None, max_tokens=None, tim
         "elapsed": round(time.time() - started, 1),
         "tokens": tokens,
         "early_stop": early_stop,
+        # True = the call was cut by the wall-clock budget, so `content` is a
+        # PARTIAL answer. Callers must treat it as a failure, not as output: a
+        # truncated rewrite could otherwise pass the gates and be recorded as a
+        # real self-edit, which would be the ledger lying about its own history.
+        "truncated": truncated,
     }
 
 

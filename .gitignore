@@ -6,3 +6,7 @@ __pycache__/
 node_modules/
 # Ephemeral runtime junk (the residence's durable state IS committed)
 freebrain-residence/rag/*.tmp
+# Runtime logs from the phone watchdog (freebrain-residence/ IS committed)
+drift-run.log
+ollama.log
+.drift_exit_code

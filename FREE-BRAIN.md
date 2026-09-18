@@ -2,7 +2,7 @@
 
 **Epistemic Status:** Experimental / Frontier R&D Framework
 **Target Domain:** Open-Weight Autonomous Agent Synthesis & Decentralized Cognitive Routing
-**Status:** research/design — rev 0.8 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 32 cycles on phone-class hardware, coherence 1.00, frozen graph hash, ~11 min/cycle; **P6 runtime** — two deployment paths: always-on Oracle kit in `deploy/oracle/` and a card-free GitHub Actions runner in `.github/workflows/drift-runner.yml` + `deploy/actions/`, see §9)
+**Status:** research/design — rev 0.9 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 37+ cycles on phone-class hardware, coherence 1.00, sticky (not frozen) graph hash; Q1 throughput **corrected** — 0.13 tok/s was contention, ~6.3 tok/s measured idle (§1 correction); **P6 runtime** — three deployment paths: always-on Oracle kit (`deploy/oracle/`), a card-free GitLab CI pipeline (`.gitlab-ci.yml` + `deploy/gitlab/`), and a phone watchdog (`deploy/phone/`); GitHub Actions blocked by an account billing lock, see §9)
 
 This document is the full decomposition of the research brief. It is written to be
 honest about what is established, what is plausible, and what is speculative — the
@@ -91,6 +91,42 @@ ready to measure the moment it runs on capable hardware (laptop/desktop, a mini-
 or a Raspberry Pi 5 with 8+ GB RAM). Until then the phone stays on the cloud
 fallback (Vertex). Q1 is deferred, not falsified; the evidence log is the record
 that will be updated when a real machine runs the 20-task suite.
+
+#### Correction (2026-09-18) — the 0.13 tok/s figure was *contention*, not a ceiling
+
+The table above is accurate as measured but was **misread**: it was taken while
+the phone was busy, and it led this document to conclude that interactive local
+inference was impossible on the device. Re-measuring the same rig
+(1.5b, same endpoint, same harness) with the phone left alone gives a different
+result — the drift loop's own per-step evidence, in cycle order:
+
+| Cycle | Graph | Rewrite | Throughput |
+| --- | --- | --- | --- |
+| 32 | 22 tok / 171 s | 72 tok / 529 s | 0.13 tok/s *(busy phone)* |
+| 33 | — | 94 tok | 1.85 tok/s |
+| 34 | — | — | 3.71 tok/s |
+| 35 | — | — | 4.42 tok/s |
+| 36 | — | — | 5.53 tok/s |
+| 37 | 22 tok / **4.9 s** | 72 tok / **10.0 s** | **6.3–7.2 tok/s** |
+
+**~50× the earlier number, on the same hardware.** Throughput also *climbed*
+monotonically over the first cycles rather than sitting flat, which is what a
+warm model and a settled page cache look like — not a hardware wall.
+
+**What this changes.** The earlier conclusion ("local inference on this device is
+physically unusable; Q1 needs other hardware") was **too strong**, and it was
+drawn from a single contended measurement. The honest statement is narrower and
+more useful: *on phone-class CPU, local throughput is dominated by memory
+contention from other processes.* Left alone, the same phone runs a full
+self-rewrite cycle (~96 tokens) in ~15 s, which puts the 1,000-cycle study at
+**hours, not days** — and moves Q1 from "deferred to other hardware" back to
+"measurable on the device already in hand".
+
+This is exactly why the doc keeps a raw evidence log instead of a conclusions
+section: the wrong claim was falsifiable from data the harness had already
+recorded, and it took a re-run to notice. The lesson generalises — a throughput
+number is a measurement *of a rig under load*, and belongs in the record with
+its conditions attached.
 
 **Auto-capture (rev 0.4):** `agent_runtime.py` now records throughput on every
 model step instead of relying on hand timing. Each `--goal` step (and each
@@ -648,7 +684,7 @@ Full sequencing (every phase ends runnable and independently testable):
 
 | Phase | Deliverable | Exit criterion |
 | --- | --- | --- |
-| **P0 — Local model backend** | Open-weight backend (Ollama/vLLM/llama.cpp) behind a model-selector seam (`model-selector.mjs`: `localModelConfig`/`chatLocal`/`pingLocal`, plus the stdlib-only `agent_runtime.py` harness); Vertex demoted to fallback — the active brain on phone-class hardware (§1 evidence log) | Same task runs on local weights with zero API calls; latency recorded — first measurement: phone-class CPU ≈0.1 tok/s (Q1 deferred to capable hardware, see §1 evidence log) |
+| **P0 — Local model backend** | Open-weight backend (Ollama/vLLM/llama.cpp) behind a model-selector seam (`model-selector.mjs`: `localModelConfig`/`chatLocal`/`pingLocal`, plus the stdlib-only `agent_runtime.py` harness); Vertex demoted to fallback — the active brain on phone-class hardware (§1 evidence log) | Same task runs on local weights with zero API calls; latency recorded — phone-class CPU: ≈0.1 tok/s contended, **≈6.3 tok/s idle** (corrected 2026-09-18, §1); Q1 20-task suite still to run |
 | **P1 — One-language sandbox** | Rust guard + Docker runtime for Python3; 2 GB / 30 s caps, output cap, deadline, escape suite | Escape suite passes; Test 1 enforceable |
 | **P2 — Tool-chain synthesis** | Manifest contract + gate chain (§6); model emits Python tool-chains end-to-end | 20 curated tasks complete the chain; structured failures on reject |
 | **P3 — Integrity ledger port** | `AGENT-INTEGRITY` semantics live in the Free Brain runtime | Ledger suite green; breaker trips purge correctly |
@@ -681,9 +717,19 @@ residence to Drive every 5 minutes, so the memory outlives the machine and the
 drift curve is readable from the phone. Runbook: `deploy/oracle/ORACLE.md`
 (requires a card at signup).
 
-**Card-free P6 runtime (rev 0.8).** The same loop runs on free GitHub Actions
-runners with no card and no billing: `.github/workflows/drift-runner.yml`, runbook
-`deploy/actions/GITHUB-ACTIONS.md`. This is possible *because* of the design
+**Card-free P6 runtime — GitLab (rev 0.9).** GitHub Actions turned out to be
+unusable for a reason unrelated to this project: every job is refused with
+*"your account is locked due to a billing issue"*, account-wide, even on public
+repos where the minutes are free. The evidence that it is not a debt: all 9 prior
+runs concluded `startup_failure` with **0 minutes consumed** — the known stale
+failed-authorization-hold state. `.gitlab-ci.yml` (runbook `deploy/gitlab/GITLAB.md`)
+is the same design on GitLab's free tier, which needs no card: 400 compute minutes/month, scheduled pipelines supported, model cached
+between jobs. A full 1,000-cycle study is bracketed at ~150–200 minutes, so it
+fits inside one month's allowance.
+
+**The GitHub Actions pipeline (rev 0.8).** `.github/workflows/drift-runner.yml`,
+runbook `deploy/actions/GITHUB-ACTIONS.md` — kept in the repo because it becomes
+viable the moment the lock is lifted (a support ticket can do it, no card). This is possible *because* of the design
 already in place — a runner is killed at a 6 h wall, which is the phone's
 OOM-kill made predictable, and the residence resumes from `state.json`. Two
 consequences had to be engineered rather than assumed. First, a wall-kill
@@ -718,9 +764,23 @@ be reported as a flat line.**
   class*, not parity.
 - **Compute and latency.** Local serving costs real hardware and is slower per
   token. This is the price of "no proprietary dependency"; P0 measures and reports
-  it. First datapoint (2026-09-08): phone-class CPU measured ≈0.1 tok/s even at 0.5B
-  — interactive local use is a hardware requirement, not a model property (§1
-  evidence log).
+  it. **Corrected 2026-09-18:** the first datapoint (≈0.1 tok/s) was taken on a
+  *contended* phone and was over-read as a hardware ceiling; the same rig idle
+  measures ≈6.3 tok/s (~50×) and completes a cycle in ~15 s. So the honest risk is
+  not "local inference is impossible here" but "local throughput is *brittle* — it
+  collapses under memory contention from unrelated processes", which is a
+  scheduling property, not a hardware verdict (§1 evidence log).
+- **A silent hang is the most dangerous failure in this design.** Two separate
+  mechanisms are now required to bound one model call, because a per-read socket
+  timeout does *not* bound a trickling stream: a live run logged rewrite calls of
+  549 s and 594 s against a 300 s timeout, and a cycle then sat **hung for nine
+days** while its supervisor watched for a process that had exited — the process
+was still alive, so nothing happened. Fixed at both layers: `--max-seconds`
+bounds the *run*, `LOCAL_MODEL_STREAM_BUDGET_MS` bounds a *call*, and the phone
+watchdog now watches for **progress** (ledger growth) rather than for death. A
+truncated call is additionally refused by the gates, because a partial rewrite
+can still retain the objective anchors and would otherwise be accepted as a real
+self-edit.
 - **Isolation is an arms race.** Container escapes get discovered over time; the
   T7-class threat re-runs on every update. Defense in depth: the guard treats
   container output as data.

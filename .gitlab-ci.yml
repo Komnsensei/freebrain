@@ -1,0 +1,137 @@
+# .gitlab-ci.yml — run the Free Brain Q4 drift loop on GitLab shared runners.
+# Mirror of .github/workflows/drift-runner.yml; runbook: deploy/gitlab/GITLAB.md
+#
+# WHY THIS EXISTS: GitHub Actions was blocked by an account-wide billing lock
+# (all 9 prior runs had startup_failure with 0 minutes used — a stale failed
+# authorization hold, not a debt). GitLab's free tier runs CI without a card.
+#
+# SAME DESIGN, SAME REASON IT WORKS: a CI runner is killed at a job timeout,
+# which is just a predictable version of the phone's OOM kill. The residence is
+# the machine — state.json resumes, ledger.jsonl is the record — so a job that
+# dies costs at most one cycle. The loop stops ITSELF first on a cycle boundary
+# (--max-seconds) so the persist step always gets to run.
+#
+# Free tier, verified 2026-09-18: 400 compute minutes/month on shared runners.
+# A 1,000-cycle run is ~150-200 minutes of that, so the whole study fits inside
+# one month's allowance.
+
+stages:
+  - drift
+
+variables:
+  # --- the loop ---
+  DRIFT_MODEL: "qwen2.5-coder:3b"
+  DRIFT_CYCLES: "1000"
+  # 50 minutes, inside the 1 h job timeout below. The budget is a START gate,
+  # so the run can overrun it by up to one cycle — hence the margin.
+  DRIFT_MAX_SECONDS: "3000"
+  # --- keep the weights between jobs (see `cache:` below) ---
+  OLLAMA_MODELS: "$CI_PROJECT_DIR/.ollama/models"
+  OLLAMA_HOST: "127.0.0.1:11434"
+  OLLAMA_KEEP_ALIVE: "-1"
+  # P6 is the zero-API-calls configuration, so the cascade stays off.
+  BRAIN_CASCADE: "0"
+  DRIVE_RESIDENCE: "freebrain-residence"
+
+# One run at a time. Two loops on one checkpoint would interleave cycles and
+# corrupt the drift record — and a corrupted record is worse than no record.
+resource_group: freebrain-drift
+
+drift:
+  stage: drift
+  timeout: 1h
+  # Pin the image: GitLab's default runner image is a Ruby one and ships neither
+  # python3 nor curl, so the job would fail at the first line without this.
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl ca-certificates python3 git tar >/dev/null
+  # Raise this in Settings > CI/CD > General pipelines > Timeout if your plan
+  # allows longer jobs; then raise DRIFT_MAX_SECONDS to match (leave ~10 min).
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+  cache:
+    key: "ollama-$DRIFT_MODEL"
+    paths:
+      - .ollama/
+  script:
+    - |
+      set -e
+      echo "host: $(nproc) vCPU / $(free -g | awk '/^Mem:/{print $2}') GB RAM"
+
+    # ── Ollama ────────────────────────────────────────────────────────────
+    - curl -fsSL https://ollama.com/install.sh | sh
+    - nohup ollama serve > ollama.log 2>&1 &
+    - |
+      for i in $(seq 1 60); do
+        curl -fsS -m 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
+        [ "$i" = 60 ] && { echo "ollama never came up"; cat ollama.log; exit 1; }
+        sleep 1
+      done
+      ollama --version
+
+    # ── the model (free if the cache restored it) ─────────────────────────
+    - |
+      if ollama list | awk '{print $1}' | grep -qx "$DRIFT_MODEL"; then
+        echo "cache hit — $DRIFT_MODEL already present"
+      else
+        ollama pull "$DRIFT_MODEL"
+      fi
+
+    # ── the wave ──────────────────────────────────────────────────────────
+    # NOTE: GitLab concatenates every script line into ONE shell script (unlike
+    # GitHub Actions, where each `run:` is its own shell). So there is no
+    # `exit 0` here: exiting would end the job and skip the persist step — the
+    # exact way a run loses every cycle it produced. `cmd && A || B` instead
+    # captures the code without aborting, and the verdict is applied at the end.
+    - |
+      python3 -u drift_loop.py --cycles "$DRIFT_CYCLES" --max-seconds "$DRIFT_MAX_SECONDS" && CODE=0 || CODE=$?
+      echo "loop exit code: $CODE"
+      echo "$CODE" > .drift_exit_code
+      # 0 = complete or clean budget stop · 2 = breaker trip · 3 = Test 2
+      # falsified. All three are RESULTS, finished and ready to persist.
+      case "$CODE" in
+        0|2|3) echo "documented terminal state: $CODE" ;;
+        *)     echo "UNEXPECTED drift_loop exit $CODE (will be flagged after persisting)" ;;
+      esac
+
+    # ── persist the residence ─────────────────────────────────────────────
+    # Always runs, so a breaker trip or a crash still lands its completed
+    # cycles. Losing the record of a failure is worse than the failure.
+    - |
+      set -e
+      CYCLE=$(python3 -c "import json;print(json.load(open('freebrain-residence/state.json')).get('cycle','?'))" 2>/dev/null || echo '?')
+      git config user.name  "freebrain-runner"
+      git config user.email "freebrain@users.noreply.gitlab.com"
+      git add -A freebrain-residence
+      if git diff --cached --quiet; then
+        echo "no residence changes to persist"
+      else
+        git commit -m "drift: cycle $CYCLE ($CI_PIPELINE_ID) [skip ci]"
+        if [ -n "${GITLAB_PUSH_TOKEN:-}" ]; then
+          git push "https://oauth2:${GITLAB_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
+            "HEAD:${CI_DEFAULT_BRANCH}"
+          echo "persisted up to cycle $CYCLE"
+        else
+          echo "GITLAB_PUSH_TOKEN not set — committed locally only."
+          echo "The artifacts below still capture the record."
+        fi
+      fi
+
+    # ── verdict, AFTER persisting ────────────────────────────────────────
+    # Red only for a genuine crash. A breaker trip is the loop working.
+    - |
+      CODE=$(cat .drift_exit_code 2>/dev/null || echo unknown)
+      case "$CODE" in
+        0|2|3) echo "exit $CODE is a documented terminal state" ;;
+        *)     echo "drift_loop exited $CODE — unexpected, not a documented terminal state"; exit 1 ;;
+      esac
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - freebrain-residence/ledger.jsonl
+      - freebrain-residence/state.json
+      - freebrain-residence/evidence/
+      - ollama.log

@@ -106,6 +106,24 @@ class ChainTest(unittest.TestCase):
         self.assertEqual(groq["timeout_ms"], 60000)
         self.assertEqual(bc.chain(_config(), env)[0]["timeout_ms"], 180000)
 
+    def test_the_stream_budget_reaches_every_hop(self):
+        """The wall-clock budget only works if it reaches the hop that actually
+        streams. A per-read timeout cannot bound a trickling stream, so a budget
+        left behind on the top-level config would silently do nothing."""
+        cfg = _config()
+        cfg["stream_budget_ms"] = 12345
+        env = {p["key_envs"][0]: "k" for p in bc.PROVIDER_REGISTRY}
+        for entry in bc.chain(cfg, env):
+            self.assertEqual(entry.get("stream_budget_ms"), 12345,
+                             "hop %s lost the stream budget" % entry["name"])
+
+    def test_no_budget_key_when_the_config_has_none(self):
+        """Hand-built configs (tests, other callers) must keep the module default
+        rather than inheriting a None budget."""
+        cfg = _config()
+        cfg.pop("stream_budget_ms", None)
+        self.assertNotIn("stream_budget_ms", bc.chain(cfg)[0])
+
     def test_configured_names_lists_only_ready_providers(self):
         env = _env(self.tmp, MISTRAL_API_KEY="m")
         self.assertEqual(bc.configured_names(env), ["mistral"])

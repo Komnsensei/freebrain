@@ -20,6 +20,7 @@ import socket
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -82,6 +83,22 @@ class _StubProviderHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
+            trickle = getattr(self.server, "trickle", None)
+            if trickle:
+                # Slow stream: models on CPU-only hardware trickle tokens out.
+                # A per-read timeout never trips on this; only a wall-clock
+                # budget can bound it. Used by the truncation tests.
+                count, delay = trickle
+                for i in range(count):
+                    piece = {"choices": [{"delta": {"content": "tok%d " % i}}]}
+                    try:
+                        self.wfile.write(("data: " + json.dumps(piece) + "\n\n").encode())
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError):
+                        return
+                    time.sleep(delay)
+                self.wfile.write(b"data: [DONE]\n\n")
+                return
             chunk = {"choices": [{"delta": {"content": "FINAL: cascade reached me"}}]}
             self.wfile.write(("data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n").encode())
         else:
@@ -353,11 +370,13 @@ class CascadeWiringTest(unittest.TestCase):
                 "model": "stub-model", "timeout_ms": 3000,
                 "temperature": 0.2, "max_tokens": 64}
 
-    def _stub_provider(self, name="groq"):
-        return {"name": name, "local": False, "key": "gsk_test",
-                "url": "http://127.0.0.1:%d/v1" % self.port,
-                "model": "stub-groq", "timeout_ms": 5000,
-                "temperature": 0.2, "max_tokens": 64}
+    def _stub_provider(self, name="groq", **overrides):
+        entry = {"name": name, "local": False, "key": "gsk_test",
+                 "url": "http://127.0.0.1:%d/v1" % self.port,
+                 "model": "stub-groq", "timeout_ms": 5000,
+                 "temperature": 0.2, "max_tokens": 64}
+        entry.update(overrides)  # chain() copies the stream budget into each hop
+        return entry
 
     def _use_chain(self, entries):
         original = brain_cascade.chain
@@ -367,6 +386,53 @@ class CascadeWiringTest(unittest.TestCase):
     def test_no_keys_means_the_chain_is_local_only(self):
         names = [e["name"] for e in brain_cascade.chain(_config())]
         self.assertEqual(names, ["local"])
+
+    # ── the wall-clock budget: the fix for a hung cycle ─────────────────────
+    #
+    # Observed live: a 300 s per-read timeout did NOT stop calls that took 549 s
+    # and 594 s, and one cycle then hung for NINE DAYS on a phone. A per-read
+    # timeout cannot bound a trickle, so the total call needs its own budget.
+
+    def test_a_normal_stream_is_not_flagged_truncated(self):
+        self._use_chain([self._stub_provider()])
+        reply = agent_runtime.chat_stream(
+            _config(), [{"role": "user", "content": "hello"}])
+        self.assertFalse(reply["truncated"])
+
+    def test_a_trickling_stream_is_cut_by_the_budget_and_flagged(self):
+        """The exact failure that hung the phone: a slow stream that never
+        trips a per-read timeout. The budget must cut it, keep the partial
+        content, and say so."""
+        self._use_chain([self._stub_provider(stream_budget_ms=150)])
+        self.server.trickle = (10, 0.05)  # 10 tokens, 50 ms apart = ~0.5 s
+        self.addCleanup(lambda: setattr(self.server, "trickle", None))
+        env = {"LOCAL_MODEL_URL": "http://127.0.0.1:%d/v1" % self.port,
+               "LOCAL_MODEL": "stub-groq",
+               "LOCAL_MODEL_TIMEOUT_MS": "60000",   # deliberately generous: the
+               "LOCAL_MODEL_STREAM_BUDGET_MS": "150",  # per-read timeout won't fire
+               "EVIDENCE_FILE": ""}
+        config = agent_runtime.load_config(env)
+        self.assertEqual(config["stream_budget_ms"], 150)
+        started = time.time()
+        reply = agent_runtime.chat_stream(config, [{"role": "user", "content": "hi"}])
+        elapsed = time.time() - started
+
+        self.assertTrue(reply["truncated"], "budget must flag the cut")
+        self.assertGreater(reply["tokens"], 0, "tokens already streamed are kept")
+        self.assertLess(reply["tokens"], 10, "it stopped before the stream finished")
+        self.assertLess(elapsed, 0.5, "it aborted early instead of running to the end")
+        self.assertIn("tok0", reply["content"])
+
+    def test_budget_zero_disables_the_cap(self):
+        self._use_chain([self._stub_provider(stream_budget_ms=0)])
+        env = {"LOCAL_MODEL_URL": "http://127.0.0.1:%d/v1" % self.port,
+               "LOCAL_MODEL": "stub-groq",
+               "LOCAL_MODEL_STREAM_BUDGET_MS": "0",
+               "EVIDENCE_FILE": ""}
+        reply = agent_runtime.chat_stream(agent_runtime.load_config(env),
+                                          [{"role": "user", "content": "hi"}])
+        self.assertFalse(reply["truncated"])
+        self.assertIn("cascade reached me", reply["content"])
 
     def test_streaming_call_fails_over_to_the_free_provider(self):
         self._use_chain([self._dead_local(), self._stub_provider()])

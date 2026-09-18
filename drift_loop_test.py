@@ -73,9 +73,16 @@ class StubModel:
     def __call__(self, config, messages, temperature=None, max_tokens=None, timeout_s=None, stop_when=None):
         self.calls.append({"messages": messages, "temperature": temperature, "max_tokens": max_tokens})
         if not self.replies:
-            return {"content": "", "elapsed": 0.0, "tokens": 0, "early_stop": False}
+            return {"content": "", "elapsed": 0.0, "tokens": 0, "early_stop": False,
+                    "truncated": False}
         r = self.replies.pop(0)
-        return {"content": r, "elapsed": 0.5, "tokens": 20, "early_stop": True}
+        base = {"elapsed": 0.5, "tokens": 20, "early_stop": True, "truncated": False}
+        if isinstance(r, dict):
+            # scripted result override — used to simulate a budget-truncated call
+            base.update(r)
+            return base
+        base["content"] = r
+        return base
 
 
 class DriftLoopTest(unittest.TestCase):
@@ -374,6 +381,50 @@ class DriftLoopTest(unittest.TestCase):
         finally:
             drift_loop.chat_stream = original
         self.assertEqual(code, 3)  # Test 2 falsified
+
+    # ── truncated calls must never be accepted as answers ──────────────────
+    #
+    # A budget-cut call returns PARTIAL text. A partial rewrite can still retain
+    # the objective anchors, so without this guard it would pass the gates and
+    # be written into instructions.md as an accepted self-edit — the loop
+    # quietly mutating itself with a half-sentence.
+
+    def test_a_truncated_graph_is_not_recorded_as_a_dispatch_graph(self):
+        stub = StubModel([{"content": GOOD_GRAPH_JSON, "truncated": True}])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            result = self._run().cycle()
+        finally:
+            drift_loop.chat_stream = original
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["gate"], "rejected")
+        self.assertIsNone(result["graph_hash"])
+        recs = self._ledger_records()
+        self.assertEqual(recs[0]["graph_sig"], "graph:budget-exceeded")
+        self.assertNotEqual(recs[0]["graph_sig"], "graph:ok")
+
+    def test_a_truncated_rewrite_is_refused_and_the_self_is_not_edited(self):
+        before = self._run()
+        original_instructions = before.state["instructions"]
+        # a good graph, then a rewrite that WOULD pass the gates but is partial
+        stub = StubModel([GOOD_GRAPH_JSON,
+                          {"content": GOOD_REWRITE_JSON, "truncated": True}])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            run = self._run()
+            run.cycle()
+        finally:
+            drift_loop.chat_stream = original
+
+        recs = self._ledger_records()
+        self.assertEqual(recs[0]["rewrite_sig"], "rewrite:budget-exceeded")
+        self.assertFalse(recs[0]["rewrite_ok"])
+        self.assertEqual(recs[0]["retention"], 0.0)
+        # the mutable self must be untouched
+        loaded = DriftRun.load(self.config, drift_loop.DEFAULT_OBJECTIVE, self.res)
+        self.assertEqual(loaded.state["instructions"], original_instructions)
 
     def test_objective_anchors_extracted(self):
         anchors = _objective_anchors(drift_loop.DEFAULT_OBJECTIVE)
