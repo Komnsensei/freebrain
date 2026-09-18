@@ -34,13 +34,20 @@ variables:
   BRAIN_CASCADE: "0"
   DRIVE_RESIDENCE: "freebrain-residence"
 
-# One run at a time. Two loops on one checkpoint would interleave cycles and
-# corrupt the drift record — and a corrupted record is worse than no record.
-resource_group: freebrain-drift
-
+# NOTE: `resource_group` is a JOB keyword and belongs INSIDE a job. Written at
+# the top level it is parsed as a job *named* resource_group with no script,
+# which makes the entire config invalid — and an invalid config does not fail
+# loudly, it silently produces ZERO jobs for every pipeline, which looks exactly
+# like a broken runner. Caught by GitLab's own parser:
+#   POST /projects/:id/ci/lint  →  "jobs resource_group config should implement
+#   the script:, run:, or trigger: keyword"
+# Always lint with that endpoint; a local syntax check cannot see this.
 drift:
   stage: drift
   timeout: 1h
+  # One run at a time. Two loops on one checkpoint would interleave cycles and
+  # corrupt the drift record — and a corrupted record is worse than no record.
+  resource_group: freebrain-drift
   # Pin the image: GitLab's default runner image is a Ruby one and ships neither
   # python3 nor curl, so the job would fail at the first line without this.
   image: ubuntu:24.04
@@ -160,6 +167,8 @@ smoke:
   stage: verify
   timeout: 1h
   image: ubuntu:24.04
+  # Same group as `drift`: never two loops — or two 2 GB model pulls — at once.
+  resource_group: freebrain-drift
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never

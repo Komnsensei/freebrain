@@ -64,6 +64,7 @@ This is not a plan; it is the state of the account.
 | Default branch | `main` |
 | `GITLAB_PUSH_TOKEN` | set, **masked** — runs can persist the residence |
 | Schedule | `0 */6 * * *` UTC, id `4448457`, **paused on purpose** |
+| Smoke schedule | id `4448474`, carries `SMOKE=1`, inactive — *play* it by hand |
 | Shared runners | enabled; job timeout 1 h (`build_timeout: 3600`) |
 
 `deploy/gitlab/setup.sh` did all of that in a single run — token verified,
@@ -80,11 +81,37 @@ cannot be merged afterwards. See *Handing off* below for the one-step swap.
 The GitHub failure was **account-level**, and from inside a repository that looks
 exactly like a broken pipeline. So the question worth answering first is not "is
 our YAML right" but "does a job start here at all". The pipeline has a job for
-that:
+that — but on this project it **cannot** be started the usual way.
 
-1. **CI/CD → Pipelines → Run pipeline**
-2. Add variable `SMOKE` = `1`
-3. Run
+**Do not use CI/CD → Run pipeline with a variable.** GitLab refuses it:
+
+```json
+{"message":{"base":["Insufficient permissions to set pipeline variables"]}}
+```
+
+That is not a token problem — the same token created the project, the CI variable
+and the schedules. It is a project setting:
+
+| Setting | Value |
+|---|---|
+| `ci_pipeline_variables_minimum_override_role` | `no_one_allowed` |
+| `restrict_user_defined_variables` | `true` |
+
+GitLab's defaults block *pipeline-level* overrides for everyone. **Schedule**
+variables are a different object and still work — so the smoke run is a
+dedicated schedule:
+
+| | |
+|---|---|
+| Description | `freebrain smoke (manual only)` — id `4448474` |
+| Variable | `SMOKE=1` (on the schedule, not the pipeline) |
+| Cron | `0 0 29 2 *` — Feb 29, so it only fires in a leap year |
+| Active | no — it exists to be *played* |
+
+Play it from **CI/CD → Schedules → ▶**, or
+`POST /projects/86614316/pipeline_schedules/4448474/play`.
+(To use the normal UI path instead, raise **Settings → CI/CD → General pipelines →
+Minimum role to override variables** to Developer or above.)
 
 It reports the runner spec, installs Ollama, pulls (and *caches*) the model,
 verifies `GITLAB_PUSH_TOKEN` can actually reach the repo, runs all four test
@@ -204,9 +231,9 @@ losing the record of a failure is worse than the failure.
 
 ---
 
-## Two mistakes this pipeline is built to avoid
+## Three mistakes this pipeline is built to avoid
 
-Both were caught by testing, and both would have cost a whole run's cycles:
+All three were caught by testing, and each would have silently cost the study:
 
 1. **`exit 0` after the loop.** GitHub Actions runs each `run:` in its own
    shell, so exiting early there is harmless. **GitLab concatenates every
@@ -217,6 +244,17 @@ Both were caught by testing, and both would have cost a whole run's cycles:
 2. **The default runner image has no `python3`.** GitLab's default image is a
    Ruby one. The job pins `ubuntu:24.04` and installs `python3`/`curl` first, or
    it would die on line one.
+3. **`resource_group` written at the top level.** It is a *job* keyword. At root
+   level GitLab parses it as a job named `resource_group` with no script — which
+   makes the **entire config invalid**, and not loudly: every pipeline then
+   produces **zero jobs**, which reads exactly like "the runner never started".
+   That is the failure that actually bit this project: a hand-rolled validator
+   passed the file (stages declared, every embedded shell block `bash -n`-clean)
+   while GitLab's own parser rejected it in one call. `setup.sh` now lints against
+   `POST /projects/:id/ci/lint` **before** anything depends on the config, and
+   an invalid config is a hard failure rather than a silent no-op. The general
+   lesson: validate CI config with the CI system's own parser, not a local
+   approximation of it.
 
 ---
 

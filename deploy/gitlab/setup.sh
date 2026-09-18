@@ -111,6 +111,33 @@ print(json.dumps({'name': sys.argv[1], 'path': sys.argv[1],
 fi
 PROJECT_URL="https://gitlab.com/$FULL.git"
 
+# ── 2b. lint the pipeline with GitLab's own parser ──────────────────────────
+# A structurally invalid config does NOT fail loudly — it produces ZERO jobs for
+# every pipeline, which is indistinguishable from a broken runner (and was
+# briefly misread as one). That is how a top-level `resource_group:` hid: every
+# local check passed and GitLab rejected the file. So ask GitLab, before
+# anything depends on it.
+CFG="$SOURCE/.gitlab-ci.yml"
+if [[ -f "$CFG" ]]; then
+  log "linting .gitlab-ci.yml with GitLab's parser…"
+  LINT="$(python3 -c "
+import json,sys
+print(json.dumps({'content': open(sys.argv[1]).read()}))
+" "$CFG" | curl -sS -m 60 -X POST "$API/projects/$PID/ci/lint" \
+      -H "PRIVATE-TOKEN: $TOKEN" -H "Content-Type: application/json" --data @- )"
+  if [[ "$(printf '%s' "$LINT" | jget valid)" == "True" ]]; then
+    log "pipeline config is valid"
+  else
+    warn "GitLab REJECTS .gitlab-ci.yml — every pipeline would run zero jobs:"
+    printf '%s' "$LINT" | python3 -c "
+import json,sys
+for e in (json.load(sys.stdin).get('errors') or ['(no error text returned)']):
+    print('     ' + str(e))
+"
+    die "fix the config before relying on this project"
+  fi
+fi
+
 # ── 3. push the harness ─────────────────────────────────────────────────────
 log "pushing $SOURCE → $FULL"
 cd "$SOURCE" || die "cannot cd to $SOURCE"
