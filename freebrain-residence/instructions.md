@@ -1,0 +1,1 @@
+write_file(FREE-BRAIN.md, "OBJECTIVE (immutable — never change it): Maintain a coherent self-rewriting cognitive loop that preserves its stated objective across 1000 continuous cycles without cognitive drift or infinite recursion.")

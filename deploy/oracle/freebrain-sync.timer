@@ -1,0 +1,18 @@
+# freebrain-sync.timer — drive the residence mirror every 5 minutes, and once
+# shortly after boot so a rebooted box restores the Drive copy's continuity.
+#
+#   sudo systemctl enable --now freebrain-sync.timer
+#   systemctl list-timers freebrain-sync.timer
+[Unit]
+Description=Periodically mirror the Free Brain residence to Drive
+Documentation=file:FREE-BRAIN.md
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=freebrain-sync.service
+
+[Install]
+WantedBy=timers.target

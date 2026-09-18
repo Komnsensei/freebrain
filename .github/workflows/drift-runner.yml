@@ -1,0 +1,209 @@
+# drift-runner.yml — run the Free Brain Q4 drift loop on an ephemeral GitHub
+# Actions runner. FREE-BRAIN.md P6; runbook: deploy/actions/GITHUB-ACTIONS.md
+#
+# WHY THIS WORKS AT ALL — the design already assumed a host that dies.
+# The residence IS the machine: state.json is the checkpoint, ledger.jsonl is
+# the record, instructions.md is the mutable self. A runner that vanishes after
+# a few hours is just the phone getting OOM-killed again, and the loop already
+# survives that. Git is the transport.
+#
+# THE ONE HARD CONSTRAINT: a job is killed at 6 h with no warning, and a kill
+# mid-run means the "persist" step never runs — losing every cycle of that run.
+# So the loop stops itself FIRST on a cycle boundary (--max-seconds), and the
+# persist step runs with `if: always()` even when the loop exits non-zero.
+#
+# FREE TIER, NO CARD:
+#   public repo  → 4 vCPU / 16 GB, unlimited minutes, `schedule` works
+#   private repo → 2 vCPU /  8 GB, 2,000 min/month, `schedule` is DISABLED on
+#                  free personal accounts → trigger via workflow_dispatch
+#                  (external cron, or the opt-in self-chain step at the end)
+name: Free Brain drift run
+
+on:
+  workflow_dispatch:
+    inputs:
+      cycles:
+        description: Target cycle count for the whole study
+        default: "1000"
+      model:
+        description: Open-weight model to run
+        default: qwen2.5-coder:3b
+      max_seconds:
+        description: Loop time budget (must leave margin inside the 6 h job wall)
+        default: "19200" # 5 h 20 m
+  schedule:
+    # :17 avoids the congested top-of-hour slot. Cron is best-effort: a delayed
+    # run is fine because the loop resumes rather than restarts.
+    - cron: "17 */6 * * *"
+
+# A second run must never start while one is writing the residence — two loops
+# on one checkpoint would interleave cycles and corrupt the drift record.
+concurrency:
+  group: freebrain-drift
+  cancel-in-progress: false
+
+permissions:
+  contents: write # the persist step commits the residence back
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350 # > the loop budget, < the 360 min hard wall
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report the host
+        run: |
+          echo "runner: $(nproc) vCPU / $(free -g | awk '/^Mem:/{print $2}') GB RAM"
+          echo "repo is: ${{ github.event.repository.private && 'PRIVATE (2 vCPU / 8 GB, cron disabled on free)' || 'PUBLIC (4 vCPU / 16 GB)' }}"
+
+      # Cache the weights. A 3b model is ~2 GB to re-download every run; the
+      # repo gets 10 GB of cache, so this turns a multi-minute pull into a
+      # restore. Keyed on the model so switching models doesn't collide.
+      - name: Restore the model cache
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama
+          key: ollama-${{ inputs.model || 'qwen2.5-coder:3b' }}
+
+      - name: Install Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          # Start it ourselves: runners have systemd, but `ollama serve` in the
+          # background is more predictable across image changes than a service.
+          export OLLAMA_HOST=127.0.0.1:11434
+          export OLLAMA_KEEP_ALIVE=-1   # a continuous loop must never reload
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS -m 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { echo "ollama never came up"; cat /tmp/ollama.log; exit 1; }
+            sleep 1
+          done
+          ollama --version
+
+      - name: Pull the model
+        env:
+          MODEL: ${{ inputs.model || 'qwen2.5-coder:3b' }}
+        run: |
+          if ollama list | awk '{print $1}' | grep -qx "$MODEL"; then
+            echo "cache hit — $MODEL already present"
+          else
+            ollama pull "$MODEL"
+          fi
+
+      - name: Run the drift loop
+        id: drift
+        env:
+          MODEL: ${{ inputs.model || 'qwen2.5-coder:3b' }}
+          CYCLES: ${{ inputs.cycles || '1000' }}
+          MAX_SECONDS: ${{ inputs.max_seconds || '19200' }}
+        run: |
+          export OLLAMA_KEEP_ALIVE=-1
+          export LOCAL_MODEL_URL=http://127.0.0.1:11434/v1
+          export LOCAL_MODEL="$MODEL"
+          export DRIVE_RESIDENCE=freebrain-residence
+          export BRAIN_CASCADE=0   # P6 is the zero-API-calls configuration
+          python3 -u drift_loop.py --cycles "$CYCLES" --max-seconds "$MAX_SECONDS"
+          CODE=$?
+          echo "loop exit code: $CODE"
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          # 0 = complete or clean stop on budget · 2 = breaker trip · 3 = Test 2
+          # falsified. All three are RESULTS, finished and ready to persist, so
+          # they must not fail the job before the persist step runs. A crash is
+          # a different thing and is red-flagged in the final step.
+          exit 0
+
+      # MUST be always(): a breaker trip, a determinism failure, or a crash
+      # mid-run must still land its completed cycles in git. Losing the record
+      # of a failure is worse than the failure.
+      - name: Persist the residence
+        if: always()
+        run: |
+          git config user.name  "freebrain-runner"
+          git config user.email "freebrain@users.noreply.github.com"
+          git add -A freebrain-residence
+          if git diff --cached --quiet; then
+            echo "no residence changes to persist"
+          else
+            CYCLE=$(python3 -c "import json;print(json.load(open('freebrain-residence/state.json')).get('cycle','?'))" 2>/dev/null || echo '?')
+            git commit -m "drift: cycle $CYCLE on run ${{ github.run_id }} [skip ci]"
+            git push
+            echo "persisted up to cycle $CYCLE"
+          fi
+
+      - name: Drift summary
+        if: always()
+        run: |
+          {
+            echo "## Free Brain drift run"
+            echo
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| model | \`${{ inputs.model || 'qwen2.5-coder:3b' }}\` |"
+            echo "| target cycles | ${{ inputs.cycles || '1000' }} |"
+            echo "| loop exit code | \`${{ steps.drift.outputs.exit_code }}\` (0 = complete/budgeted stop, 2 = breaker trip, 3 = determinism fail) |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          p = "freebrain-residence/ledger.jsonl"
+          if not os.path.exists(p):
+              print("no ledger yet — this run did not complete a cycle."); raise SystemExit
+          recs = [json.loads(l) for l in open(p) if l.strip()]
+          print(f"**{len(recs)} cycles recorded.** Last 10:\n")
+          print("| cycle | gate | coherence | graph hash | tok/s |")
+          print("| --- | --- | --- | --- | --- |")
+          for r in recs[-10:]:
+              print("| %s | %s | %s | `%s` | %s |" % (
+                  r.get("cycle"), r.get("rewrite_sig"), r.get("coherence"),
+                  (r.get("graph_hash") or "?")[:12], r.get("tokens_per_s")))
+          hashes = {r.get("graph_hash") for r in recs[-20:]}
+          print(f"\nDistinct graph hashes across the last {min(20, len(recs))} cycles: "
+                f"**{len(hashes)}**.")
+          print("> One distinct hash is a stable self-model *or* a loop that stopped "
+                "exploring. Only the full curve distinguishes them — a flat line is "
+                "reported as a flat line, never as 'stability'.")
+          PY
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-evidence-${{ github.run_id }}
+          path: |
+            freebrain-residence/ledger.jsonl
+            freebrain-residence/state.json
+            freebrain-residence/evidence/
+          retention-days: 30
+
+      # Red only for a genuine crash. A breaker trip is the loop working.
+      - name: Flag an unexpected crash
+        if: always()
+        run: |
+          CODE="${{ steps.drift.outputs.exit_code }}"
+          case "$CODE" in
+            0|2|3) echo "exit $CODE is a documented terminal state" ;;
+            *)     echo "::error::drift loop exited $CODE (unexpected — not a documented terminal state)"; exit 1 ;;
+          esac
+
+      # OPT-IN self-chaining, for repositories where `schedule` does not fire
+      # (free personal accounts + private repos — see the runbook). Each run
+      # dispatches its own successor, so the study advances without any
+      # external cron service. Requires:
+      #   secret FREE_BRAIN_PAT  — a fine-grained PAT with Actions:write
+      #   var    FREE_BRAIN_CHAIN = 1
+      # Deliberately off by default: an unattended loop that re-arms itself is
+      # also an unattended loop that can run forever.
+      - name: Chain the next run
+        if: always() && vars.FREE_BRAIN_CHAIN == '1'
+        env:
+          PAT: ${{ secrets.FREE_BRAIN_PAT }}
+        run: |
+          if [ -z "$PAT" ]; then echo "FREE_BRAIN_CHAIN=1 but no FREE_BRAIN_PAT — skipping"; exit 0; fi
+          curl -sf -X POST \
+            -H "Authorization: Bearer $PAT" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/drift-runner.yml/dispatches" \
+            -d '{"ref":"'"${GITHUB_REF_NAME:-main}"'"}'
+          echo "dispatched the successor run"

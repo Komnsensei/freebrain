@@ -1,0 +1,29 @@
+# freebrain-sync.service — mirror the residence to Google Drive via rclone.
+# Run by freebrain-sync.timer. One-shot, safe to re-run.
+#
+# The residence is the agent's memory. Pushing it to Drive means:
+#   * the run survives the VM being reclaimed/deleted
+#   * you can watch ledger.jsonl from the phone without touching the box
+#   * a new box can pull it and resume mid-run (state.json)
+[Unit]
+Description=Mirror the Free Brain residence to the Drive remote (rclone)
+Documentation=file:FREE-BRAIN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=/etc/freebrain.env
+# All logic lives in the script (systemd expands $VAR inside quotes its own way,
+# so shell-style ${VAR:-} in a unit line is a trap). No DRIVE_REMOTE → exits 0.
+ExecStart=/bin/bash __APP_DIR__/deploy/oracle/sync-residence.sh
+# A failed mirror must never look like a failed run — and it does not: the loop
+# is a separate unit. So let a genuine mirror failure FAIL here, loudly, where
+# `systemctl --failed` will show it, instead of masking it as success. The
+# script exits 0 for "nothing to do" and nonzero only when rclone really broke.
+StartLimitIntervalSec=1800
+StartLimitBurst=10
+TimeoutStartSec=900

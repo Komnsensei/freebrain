@@ -1,0 +1,44 @@
+# freebrain-loop.service — the Q4 1,000-cycle drift run as an always-on service.
+#
+# systemd IS the supervisor: if the loop is OOM-killed or the box reboots, it
+# restarts here and drift_loop.py resumes from the residence checkpoint
+# (state.json). Crash → restart → resume is the whole design.
+#
+# Exit codes (see drift_loop.py):
+#   0  run completed ................ no restart (terminal)
+#   2  breaker trip / drift alarm ... no restart (terminal — a deliberate floor)
+#   3  determinism failure .......... no restart (terminal — Test 2 falsified)
+#   anything else (signal, crash) ... restart
+#
+# Install: deploy/oracle/bootstrap.sh (substitutes __APP_DIR__ / __APP_USER__)
+[Unit]
+Description=Free Brain drift loop (Q4 self-rewrite, 1000 cycles)
+Documentation=file:FREE-BRAIN.md
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=/etc/freebrain.env
+ExecStart=/usr/bin/python3 -u drift_loop.py --cycles 1000
+Restart=on-failure
+RestartSec=15
+SuccessExitStatus=2 3
+# The run is the recorder: keep it writing even when the box is busy.
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+# Evidence must outlive a crash — the ledger is flushed per cycle by design.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=freebrain
+
+[Install]
+WantedBy=multi-user.target

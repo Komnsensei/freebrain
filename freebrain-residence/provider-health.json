@@ -1,0 +1,52 @@
+{
+  "cerebras": {
+    "cooldown_s": 3600,
+    "fails": 3,
+    "last_class": "payment",
+    "last_error": "cerebras HTTP 402 - {\"message\":\"Payment required to access this resource. Visit your billing tab.\",\"type\":\"payment_required_error\",\"param\":\"quota\",\"code\":\"payment_required\"}",
+    "last_fail": "2026-09-13T21:30:52+00:00",
+    "ok": false,
+    "total_fail": 3,
+    "total_ok": 0,
+    "until": 1789338652.712
+  },
+  "groq": {
+    "fails": 0,
+    "last_ok": "2026-09-17T06:51:35+00:00",
+    "ok": true,
+    "total_fail": 0,
+    "total_ok": 21
+  },
+  "groq#2": {
+    "fails": 0,
+    "last_ok": "2026-09-13T21:30:51+00:00",
+    "ok": true,
+    "total_fail": 0,
+    "total_ok": 3
+  },
+  "groq#3": {
+    "fails": 0,
+    "last_ok": "2026-09-13T21:30:52+00:00",
+    "ok": true,
+    "total_fail": 0,
+    "total_ok": 3
+  },
+  "groq#4": {
+    "fails": 0,
+    "last_ok": "2026-09-13T21:30:52+00:00",
+    "ok": true,
+    "total_fail": 0,
+    "total_ok": 3
+  },
+  "local": {
+    "cooldown_s": 30,
+    "fails": 14,
+    "last_class": "server",
+    "last_error": "local unreachable at http://127.0.0.1:11434/v1 (<urlopen error [Errno 111] Connection refused>) \u2014 is the server running?",
+    "last_fail": "2026-09-17T06:51:25+00:00",
+    "ok": false,
+    "total_fail": 14,
+    "total_ok": 0,
+    "until": 1789627915.648
+  }
+}

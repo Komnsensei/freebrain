@@ -1,0 +1,8 @@
+# Secrets must never land here — the workflow reads env from the workflow file.
+.env
+.env.local
+__pycache__/
+*.pyc
+node_modules/
+# Ephemeral runtime junk (the residence's durable state IS committed)
+freebrain-residence/rag/*.tmp
