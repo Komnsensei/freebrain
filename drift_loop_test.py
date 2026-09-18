@@ -430,6 +430,126 @@ class DriftLoopTest(unittest.TestCase):
         loaded = DriftRun.load(self.config, drift_loop.DEFAULT_OBJECTIVE, self.res)
         self.assertEqual(loaded.state["instructions"], original_instructions)
 
+    def test_a_rewrite_trip_does_not_crash_the_run(self):
+        """Regression: the rewrite trip path handed the RAW dispatch graph into the
+        QIH metrics, where difflib indexes its arguments — so a dict raised
+        `KeyError: 0` and killed the process mid-cycle (seen on the phone at
+        cycle 141, which lost that cycle and left state.json ahead of the ledger).
+        A trip must be a recorded outcome, not a crash.
+
+        The breaker is keyed by full signature and a successful graph only clears
+        its OWN key, so two consecutive budget-exceeded rewrites trip even with
+        good graphs in between.
+        """
+        truncated = {"content": GOOD_REWRITE_JSON, "truncated": True}
+        stub = StubModel([GOOD_GRAPH_JSON, truncated] * 2)
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            run = self._run()
+            r1 = run.cycle()   # 1st budget-exceeded rewrite → breaker count 1
+            r2 = run.cycle()   # 2nd → TRIP; this is where the crash happened
+        finally:
+            drift_loop.chat_stream = original
+        self.assertIsInstance(r1, dict)
+        self.assertEqual(r1["gate"], "rejected")
+        self.assertIsInstance(r2, str)
+        self.assertIn("TRIP", r2)
+        # The tripped cycle must still be IN the ledger — a crash loses it.
+        recs = self._ledger_records()
+        self.assertEqual(len(recs), 2)
+        self.assertEqual(recs[1]["rewrite_sig"], "rewrite:budget-exceeded")
+        self.assertEqual(recs[1]["graph_sig"], "graph:ok")
+        with open(os.path.join(self.res, "state.json")) as f:
+            st = json.load(f)
+        self.assertEqual(st["phase"], "tripped")
+
+    def test_qih_metrics_survive_a_non_string_graph(self):
+        """The distance metric must degrade to 'no metric' when handed a non-string
+        graph. difflib indexes its arguments, so comparing a dict raises instead of
+        comparing — and a type mistake must never kill a long run."""
+        run = self._run()
+        run.prev_graph = '{"a": 1}'
+        r1 = {"tokens": 10, "elapsed": 1.0}
+        # a dict here is the exact shape that used to raise KeyError: 0
+        block = run._qih_metrics(True, {"a": 2}, r1, None, 1.0)
+        self.assertNotIn("entanglement_distance", block)
+        # the string form still computes the metric
+        same = run._qih_metrics(True, '{"a": 2}', r1, None, 1.0)
+        self.assertIn("entanglement_distance", same)
+        # identical graphs → no distance metric (nothing changed this cycle)
+        none_dist = run._qih_metrics(True, '{"a": 1}', r1, None, 1.0)
+        self.assertNotIn("entanglement_distance", none_dist)
+
+    def test_a_tripped_run_is_never_resumed_implicitly(self):
+        """`load()` returning None means BOTH 'nothing to resume' and 'state exists
+        but must not be resumed'. Conflating them let a restart silently begin a
+        second run over the same ledger — forking the record — so a tripped state
+        must name itself instead."""
+        run = self._run()
+        run.state["phase"] = "tripped"
+        run.state["cycle"] = 7
+        run._save()
+        self.assertIsNone(DriftRun.load(self.config, drift_loop.DEFAULT_OBJECTIVE, self.res))
+        reason = drift_loop.unresumable_reason(drift_loop.DEFAULT_OBJECTIVE, self.res)
+        self.assertIn("tripped", reason)
+        self.assertIn("7", reason)
+
+    def test_unresumable_reason_is_none_when_a_fresh_start_is_legitimate(self):
+        """No state at all → no reason to refuse. Anything else would make the
+        guard refuse legitimate first runs."""
+        self.assertIsNone(drift_loop.unresumable_reason(drift_loop.DEFAULT_OBJECTIVE, self.res))
+        self._one_cycle()  # a normal, resumable state
+        self.assertIsNone(drift_loop.unresumable_reason(drift_loop.DEFAULT_OBJECTIVE, self.res))
+        other = drift_loop.unresumable_reason("a different objective", self.res)
+        self.assertIn("different objective", other)
+
+    def test_resume_tripped_continues_the_same_run_id(self):
+        """The operator path must continue the SAME run — a trip is a recorded
+        outcome, not a reason to throw away 140 measured cycles."""
+        run = self._run()
+        run.state["phase"] = "tripped"
+        run.breaker.record("rewrite:objective-drift", False)
+        run.breaker.record("rewrite:objective-drift", False)
+        run.breaker.record("graph:server-error", False)
+        run._save()
+        run_id = run.run
+        resumed = DriftRun.load(self.config, drift_loop.DEFAULT_OBJECTIVE, self.res, allow_tripped=True)
+        self.assertIsNotNone(resumed)
+        self.assertEqual(resumed.run, run_id)              # not a second run
+        self.assertEqual(resumed.state["phase"], "tripped")  # load alone never un-trips
+        resumed.clear_trip()
+        self.assertEqual(resumed.state["phase"], "running")
+        # BOTH counters reset: `distinct` is cumulative, and carrying it over at
+        # the limit made the resumed run abort on the first new failure category.
+        self.assertEqual(resumed.breaker.consecutive, {})
+        self.assertEqual(resumed.breaker.distinct, [])
+        with open(os.path.join(self.res, "state.json")) as f:
+            on_disk = json.load(f)
+        self.assertEqual(on_disk["phase"], "running")
+
+    def test_the_operator_reset_is_recorded_but_not_in_the_ledger(self):
+        """A reset is an intervention, so the record must show it. It goes to
+        operator-events.jsonl, NOT the ledger — the ledger's row schema is the Q1
+        evidence format and no consumer should have to filter operator rows out."""
+        run = self._run()
+        run.state["phase"] = "tripped"
+        run.breaker.record("rewrite:objective-drift", False)
+        run.breaker.record("rewrite:objective-drift", False)
+        run._save()
+        resumed = DriftRun.load(self.config, drift_loop.DEFAULT_OBJECTIVE, self.res, allow_tripped=True)
+        event = resumed.clear_trip()
+        self.assertEqual(event["event"], "operator-reset")
+        self.assertEqual(event["run"], resumed.run)
+        self.assertEqual(event["cleared"]["consecutive"], {"rewrite:objective-drift": 2})
+        self.assertEqual(event["cleared"]["distinct"], ["objective-drift"])
+        with open(os.path.join(self.res, "operator-events.jsonl")) as f:
+            lines = [json.loads(ln) for ln in f if ln.strip()]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]["event"], "operator-reset")
+        # the ledger is untouched by the reset
+        self.assertFalse(os.path.exists(os.path.join(self.res, "ledger.jsonl")))
+
     def test_objective_anchors_extracted(self):
         anchors = _objective_anchors(drift_loop.DEFAULT_OBJECTIVE)
         self.assertIn("coherent", anchors)

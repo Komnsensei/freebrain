@@ -252,12 +252,40 @@ def _state_path(res):
     return os.path.join(res, "state.json")
 
 
+def unresumable_reason(objective, residence):
+    """Why can an existing state.json NOT be resumed? None when there is no state.
+
+    `load()` returns None both for 'nothing to resume' and for 'state exists but
+    must not be resumed'. Those are different situations with the same result in
+    `main()` — a brand-new run — and for a study, starting a new run over an
+    existing ledger silently appends a second run id and forks the record. This
+    distinguishes them so the CLI can refuse instead.
+    """
+    path = _state_path(residence)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            st = json.load(f)
+    except Exception:
+        return "state.json exists but could not be read"
+    if st.get("phase") == "tripped":
+        return "the previous run tripped its breaker at cycle %s" % st.get("cycle")
+    if st.get("objective") != objective:
+        return "state.json was recorded under a different objective"
+    return None
+
+
 def _instructions_path(res):
     return os.path.join(res, "instructions.md")
 
 
 def _ledger_path(res):
     return os.path.join(res, "ledger.jsonl")
+
+
+def _operator_events_path(res):
+    return os.path.join(res, "operator-events.jsonl")
 
 
 def _trigger_path(res):
@@ -357,7 +385,7 @@ class DriftRun:
         _atomic_write(_instructions_path(self.res), self.state["instructions"])
 
     @staticmethod
-    def load(config, objective, residence):
+    def load(config, objective, residence, allow_tripped=False):
         path = _state_path(residence)
         if not os.path.exists(path):
             return None
@@ -368,9 +396,39 @@ class DriftRun:
             return None
         if st.get("objective") != objective:
             return None  # different objective → fresh run
-        if st.get("phase") == "tripped":
-            return None  # never resume a tripped run
+        if st.get("phase") == "tripped" and not allow_tripped:
+            return None  # never resume a tripped run *implicitly*
         return DriftRun(config, objective, residence, state=st)
+
+    def clear_trip(self):
+        """Operator reset for a tripped run — continue the SAME run id.
+
+        A trip is a recorded outcome, not a decision to discard the run, so the
+        trip stays in the ledger and the run id is unchanged. BOTH breaker
+        counters are reset, because they describe the segment since the last
+        reset: `distinct` is cumulative across the run, so leaving it at 2 of its
+        limit of 3 made the resumed run abort on the *first* new failure category
+        — a resume that survives almost nothing is not a resume.
+
+        The reset is written to operator-events.jsonl rather than the ledger, so
+        the study record stays schema-stable while still showing a segment
+        boundary instead of implying the run was monitored continuously.
+        """
+        cleared = {"consecutive": dict(self.breaker.consecutive),
+                   "distinct": list(self.breaker.distinct)}
+        self.breaker.consecutive.clear()
+        self.breaker.distinct.clear()
+        self.state["phase"] = "running"
+        self._save()
+        event = {"ts": _now(), "run": self.run, "cycle": self.state["cycle"],
+                 "event": "operator-reset", "cleared": cleared}
+        try:
+            with open(_operator_events_path(self.res), "a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception as exc:  # never let bookkeeping kill the resume
+            print("[drift] warning: could not record the operator reset: %s" % exc)
+            return None
+        return event
 
     # -- QIH metrics (machine-computed from measured cycle data; QIH.md §II) --
 
@@ -394,7 +452,12 @@ class DriftRun:
         # Emergent distance between consecutive accepted dispatch graphs:
         # E = similarity of the canonical graphs, d = −α₀·log(E). Identical
         # plans → distance 0; a plan that changed → distance grows.
-        if graph_ok and graph is not None and self.prev_graph and graph != self.prev_graph:
+        # Both sides must be STRINGS: difflib indexes its arguments, so a dict or
+        # a list raises (KeyError: 0 / TypeError) instead of comparing. Guarding
+        # here means a future caller's type mistake degrades to a missing metric
+        # instead of killing a 1000-cycle run mid-write.
+        if (graph_ok and isinstance(graph, str) and isinstance(self.prev_graph, str)
+                and graph and self.prev_graph and graph != self.prev_graph):
             e = difflib.SequenceMatcher(None, self.prev_graph, graph).ratio()
             try:
                 block["entanglement_distance"] = qih_metrics.entanglement_distance(e)
@@ -439,6 +502,11 @@ class DriftRun:
             # actually happen.
             gok, gsig = False, "graph:budget-exceeded"
         graph_hash = _canonical_hash(g) if gok else None
+        # Canonical STRING form of the accepted graph, computed once here because
+        # every consumer below compares it against the previous cycle's string.
+        # The raw object must never be handed to difflib: it indexes its
+        # arguments, so a dict raises `KeyError: 0` and kills the run mid-cycle.
+        cur_graph = json.dumps(g, sort_keys=True, separators=(",", ":")) if gok else None
         trip = self.breaker.record(gsig, gok)
         if trip:
             self._finish_cycle(c, "graph", gok, gsig, graph_hash, None, 0.0, r1, None, gsig, trip)
@@ -487,7 +555,7 @@ class DriftRun:
         trip = self.breaker.record(rsig, rok)
         if trip:
             self._finish_cycle(c, "rewrite", gok, gsig, graph_hash, retention, 0.0, r1, r2, rsig, trip,
-                               graph=g)
+                               graph=cur_graph)
             return trip
 
         new_instructions = rw["instructions"] if rok else self.state["instructions"]
@@ -496,7 +564,6 @@ class DriftRun:
         streak = self.state["coherence_streak"] + 1 if coherence < COHERENCE_FLOOR else 0
         # QIH metrics for this cycle's ledger record — computed BEFORE the state
         # update so prev_graph / qih_window still hold the previous cycle's values.
-        cur_graph = json.dumps(g, sort_keys=True, separators=(",", ":"))
         qih = self._qih_metrics(gok, cur_graph, r1, r2, coherence)
         self.qih_window = (self.qih_window + [coherence])[-QIH_WINDOW:]
         self.prev_graph = cur_graph
@@ -579,6 +646,7 @@ class DriftRun:
             if loaded is not None and loaded.state["cycle"] < cycles:
                 return loaded.run_cycles(cycles, resume=False, deadline=deadline)
         start = self.state["cycle"] + 1
+        ran = 0
         for c in range(start, cycles + 1):
             # Ephemeral hosts (CI runners) get hard-killed at a wall, and a kill
             # mid-run loses every cycle the host never got to persist. So stop
@@ -600,7 +668,12 @@ class DriftRun:
                 return 2
             print("[drift] cycle %d gate=%s coherence=%.2f hash=%s" % (
                 c, result["gate"], result["coherence"], (result["graph_hash"] or "?")[:12]))
-        print("[drift] complete: %d cycles (acceptance + ledger in %s)" % (cycles, _ledger_path(self.res)))
+            ran += 1
+        # `cycles` is an absolute TARGET cycle, not a count — so state at cycle 141
+        # with --cycles 1 executes nothing (the range is empty). Reporting the
+        # target as if it were the number run claimed work that never happened.
+        print("[drift] complete: target cycle %d (%d cycle(s) run this invocation; ledger in %s)"
+              % (cycles, ran, _ledger_path(self.res)))
         return 0
 
     def watch(self, max_cycles=None):
@@ -671,6 +744,8 @@ def main(argv=None):
     parser.add_argument("--watch", action="store_true", help="one cycle per trigger touch instead of continuous")
     parser.add_argument("--determinism", type=int, default=0, metavar="N", help="run the Test 2 determinism battery N times")
     parser.add_argument("--no-resume", action="store_true", help="start a fresh run even if state.json exists")
+    parser.add_argument("--resume-tripped", action="store_true",
+                        help="operator reset: continue the SAME run id past a tripped breaker (trip stays in the ledger)")
     parser.add_argument("--temperature", type=float, default=None, help="pinned temperature (determinism battery)")
     parser.add_argument("--max-seconds", type=int, default=None, metavar="N",
                         help="stop cleanly before N seconds elapse — for ephemeral hosts with a hard kill")
@@ -694,12 +769,26 @@ def main(argv=None):
 
     run = None
     if not args.no_resume:
-        run = DriftRun.load(config, objective, residence)
+        run = DriftRun.load(config, objective, residence, allow_tripped=args.resume_tripped)
     if run is None:
+        if not args.no_resume:
+            blocked = unresumable_reason(objective, residence)
+            if blocked:
+                # Starting a fresh run here would append a second run id to the
+                # same ledger and fork the record — refuse loudly instead.
+                print("[drift] refusing to start a fresh run — %s" % blocked)
+                print("[drift] a new run would append a second run id to %s and fork the study."
+                      % _ledger_path(residence))
+                print("[drift] continue this run: --resume-tripped | start a new one: --no-resume")
+                return 2
         run = DriftRun(config, objective, residence)
         print("[drift] fresh run %s — residence %s" % (run.run, residence))
     else:
         print("[drift] resuming run %s at cycle %d — residence %s" % (run.run, run.state["cycle"], residence))
+        if run.state.get("phase") == "tripped":
+            run.clear_trip()
+            print("[drift] operator reset: cleared the trip at cycle %d — the trip remains in the ledger"
+                  % run.state["cycle"])
 
     deadline = (time.time() + args.max_seconds) if args.max_seconds else None
     if deadline is not None:

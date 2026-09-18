@@ -120,6 +120,19 @@ except Exception: print('?')
   ran=$(( $(date +%s) - started ))
   log "drift_loop exited rc=$rc after ${ran}s"
 
+  # rc=2 is the loop REFUSING to start a fresh run over an existing record
+  # (tripped breaker, or a different objective). Restarting cannot fix that — it
+  # would spin forever and bury the reason under restart noise — so stop and say
+  # what the operator's options are. Resuming keeps the original run id; starting
+  # a new run appends a second run id to the same ledger and forks the study.
+  if [ "$rc" -eq 2 ]; then
+    log "TERMINAL: the loop declined to continue this record — see the lines above."
+    log "  continue this run:  cd $APP_DIR && python3 drift_loop.py --cycles $CYCLES --resume-tripped"
+    log "  start a new study:  cd $APP_DIR && python3 drift_loop.py --cycles $CYCLES --no-resume"
+    log "watchdog stopping — no restart can resolve this."
+    break
+  fi
+
   # A loop that dies instantly is a configuration problem (no model, server
   # down), not a crash: back off instead of spinning and draining the battery.
   if [ "$ran" -lt 30 ]; then

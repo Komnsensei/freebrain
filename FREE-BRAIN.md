@@ -859,6 +859,24 @@ watchdog now watches for **progress** (ledger growth) rather than for death. A
 truncated call is additionally refused by the gates, because a partial rewrite
 can still retain the objective anchors and would otherwise be accepted as a real
 self-edit.
+- **A crash is a different failure from a hang — and it cost a cycle.** On
+  2026-09-18 the phone run reached cycle 141 and died with `KeyError: 0`: the
+  breaker-trip path handed the *raw* dispatch graph (a dict) to the QIH metrics,
+  where `difflib.SequenceMatcher` **indexes** its arguments instead of comparing
+  them. Every other path passed the canonical JSON *string*, so the bug could only
+  fire when a trip followed an accepted graph. Fixed by passing the string on the
+  trip path and making the metric degrade to "no metric" on a non-string input;
+  both regression tests fail against the old code. The cycle that died was never
+  recorded, so it is visible as an offset: `state.json` at 141, the ledger at 140.
+- **Restarting is not always the safe move — and the convenient path was the
+  dangerous one.** Because a tripped run must never resume *implicitly*, `load()`
+  returning `None` conflated "nothing to resume" with "must not resume", so a
+  plain restart began a **second** run over the same ledger — appending a second
+  run id and forking the study. The CLI now refuses (exit 2) and names both
+  options: `--resume-tripped` continues the **same** run id, recording the
+  intervention in `operator-events.jsonl` so the ledger's evidence schema stays
+  untouched, while `--no-resume` starts a new study. The phone watchdog treats
+  exit 2 as terminal and stops, rather than restarting a refusal forever.
 - **Isolation is an arms race.** Container escapes get discovered over time; the
   T7-class threat re-runs on every update. Defense in depth: the guard treats
   container output as data.
