@@ -55,48 +55,73 @@ between jobs.
 
 ## Setup
 
-### 1. Account and project
+Only the **account** needs doing by hand — everything after it is one command.
 
-Create an account at <https://gitlab.com/users/sign_up> (no card), then a new
-project. Push the harness — the same file set as the GitHub repo:
+### 1. Create the account (the part that cannot be automated)
+
+<https://gitlab.com/users/sign_up> — no card. Then **confirm the emailed
+verification link**: GitLab blocks API access until it is confirmed, which looks
+like a broken token rather than an unverified email. `setup.sh` detects that case
+and says so explicitly.
+
+### 2. Create a Personal Access Token
+
+**User settings → Access tokens**, with **both** scopes:
+- `api` — create the project, variables and schedules
+- `write_repository` — push the harness and let runs commit the residence
+
+### 3. Run the setup script
 
 ```bash
 cd /path/to/harness
-git init -b main
-git add -A
-git commit -m "Free Brain: file-driven self-rewriting drift loop (Q4 harness)"
-git remote add origin https://gitlab.com/<you>/freebrain.git
-git push -u origin main
+GITLAB_TOKEN=glpat-xxxxxxxx bash deploy/gitlab/setup.sh
 ```
 
-### 2. Let the job push the residence back
+`deploy/gitlab/setup.sh` does the rest, idempotently — safe to re-run:
 
-The pipeline commits `freebrain-residence/` after every run, so the record
-survives the ephemeral runner. That needs a token:
+| Step | What it does |
+|---|---|
+| verify | calls `/user`; explains a rejected token or an unconfirmed email |
+| project | creates `freebrain` (or reuses the existing one) |
+| push | pushes the current branch to `gitlab.com/<you>/freebrain` |
+| variable | sets `GITLAB_PUSH_TOKEN` as a **masked** CI variable |
+| schedule | creates a pipeline schedule (`0 */6 * * *` UTC) |
+| trigger | starts the first pipeline and prints its URL |
 
-1. **Settings → Access tokens** → create a **project access token** with the
-   `write_repository` scope (role: Maintainer).
-2. **Settings → CI/CD → Variables** → add a **masked** variable:
-   - key: `GITLAB_PUSH_TOKEN`
-   - value: the token
-   - **masked**: yes · **protected**: no (schedule runs on the default branch)
+Useful flags: `--public`, `--project NAME`, `--cron '0 */4 * * *'`,
+`--no-trigger`, `--source DIR`.
 
-Without this the job still runs and still stores artifacts (ledger, state,
-evidence) for 30 days — it just can't write the branch, and the log says so
-rather than pretending it succeeded.
+> **Why the token goes in the environment, not the command line:** `--token`
+> exists, but an argument is visible to `ps`. `GITLAB_TOKEN` (or `--token-file`)
+> keeps it out of the process table. The push itself uses an inline credential
+> URL, and the resulting remote is stored **without** the token, so nothing
+> sensitive lands in `.git/config`.
 
-### 3. Raise the job timeout (if your plan allows)
+### 4. Let the job push the residence back
+
+Step 3 already set the `GITLAB_PUSH_TOKEN` variable, which is what allows the
+pipeline to commit `freebrain-residence/` after every run so the record survives
+the ephemeral runner. Without it the job still runs and still stores artifacts
+(ledger, state, evidence) for 30 days — it just cannot write the branch, and the
+log says so rather than pretending it succeeded.
+
+### 5. Raise the job timeout (if your plan allows)
 
 **Settings → CI/CD → General pipelines → Timeout**. If you can raise it past
 1 h, also raise `DRIFT_MAX_SECONDS` in `.gitlab-ci.yml` — always leaving
 **~10 minutes of margin**, because `--max-seconds` is a *start* gate and a cycle
 that begins just before the deadline still runs to completion.
 
-### 4. Schedule it
+### 6. Check the schedule
 
-Once you are happy running it by hand: **CI/CD → Schedules → New schedule**,
-target branch `main`, interval e.g. every 6 hours. Scheduled pipelines are
-supported on the free tier, so the study advances unattended.
+Step 3 already created one (`CI/CD → Schedules`). Edit or pause it there if you
+want to run by hand first — scheduled pipelines are supported on the free tier,
+so the study advances unattended once it is on.
+
+> **Run the study on ONE host at a time.** The phone watchdog and this pipeline
+> would both write the same residence; two writers interleave cycles and corrupt
+> the drift record — worse than no record. Pause the schedule while the phone is
+grinding, and vice versa.
 
 ---
 
