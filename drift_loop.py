@@ -320,6 +320,13 @@ class DriftRun:
         # QIH metrics state (QIH.md §II) — machine-computed, resumed from state.json
         self.prev_graph = self.state.get("prev_graph")
         self.qih_window = list(self.state.get("qih_window") or [])
+        # Behavioural tracking. `prev_graph` above answers "did the plan change?"
+        # only for the entanglement metric and is overwritten each accepted cycle;
+        # these two answer a different question and must survive a resume: has this
+        # plan been seen before ANYWHERE in this run? That is what separates a
+        # stable self-model from a loop that reached a fixed point and stopped.
+        self.seen_graph_hashes = set(self.state.get("seen_graph_hashes") or [])
+        self.prev_logged_hash = self.state.get("prev_logged_hash")
 
     def _fresh_state(self):
         return {
@@ -334,6 +341,8 @@ class DriftRun:
             "prev_metrics": None,
             "prev_graph": None,
             "qih_window": [],
+            "seen_graph_hashes": [],
+            "prev_logged_hash": None,
             "started": _now(),
         }
 
@@ -642,6 +651,20 @@ class DriftRun:
         tokens = int((r1.get("tokens") or 0)) + int((r2.get("tokens") or 0)) if r2 else int(r1.get("tokens") or 0)
         elapsed = float(r1.get("elapsed") or 0.0) + float((r2.get("elapsed") or 0.0)) if r2 else float(r1.get("elapsed") or 0.0)
         tps = round(tokens / elapsed, 2) if elapsed >= 0.05 else None
+        # Request size for the whole cycle (graph + rewrite calls). Without this,
+        # a slowdown cannot be attributed: `tokens`/`elapsed` describe the reply
+        # only. Measured from the request, so it works for every provider.
+        prompt_chars = int(r1.get("prompt_chars") or 0) + int((r2 or {}).get("prompt_chars") or 0)
+        # Behavioural novelty — the field a pure coherence curve cannot show. A
+        # run can hold coherence 1.00 while never changing its plan; that is a
+        # fixed point, not self-modification, and only these fields reveal it.
+        graph_changed = bool(graph_hash) and graph_hash != self.prev_logged_hash
+        graph_novel = bool(graph_hash) and graph_hash not in self.seen_graph_hashes
+        if graph_hash:
+            self.seen_graph_hashes.add(graph_hash)
+            self.prev_logged_hash = graph_hash
+            self.state["seen_graph_hashes"] = sorted(self.seen_graph_hashes)
+            self.state["prev_logged_hash"] = graph_hash
         rec = {
             "ts": _now(),
             "run": self.run,
@@ -656,6 +679,11 @@ class DriftRun:
             "tokens": tokens,
             "elapsed_s": round(elapsed, 2),
             "tokens_per_s": tps,
+            "prompt_chars": prompt_chars,
+            "prompt_tokens_est": (prompt_chars + 3) // 4,
+            "graph_changed": graph_changed,
+            "graph_novel": graph_novel,
+            "distinct_graph_hashes": len(self.seen_graph_hashes),
             "early_stop": bool(r1.get("early_stop")) or bool((r2 or {}).get("early_stop")),
             "breaker": trip,
             # Cascade attribution (brain_cascade.py): which provider actually

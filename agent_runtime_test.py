@@ -40,6 +40,7 @@ from agent_runtime import (
     _emit_step,
     _gate_activation,
     activate_qih,
+    prompt_size,
     run_goal,
 )
 
@@ -231,6 +232,21 @@ class ActivationTest(unittest.TestCase):
         with open(os.path.join(self.res, "state.json")) as f:
             st = json.load(f)
         self.assertEqual(st["created"], "2026-01-01T00:00:00+00:00")  # created is kept
+
+
+class PromptSizeTest(unittest.TestCase):
+    """Request size must be measured from what we SEND, because a streaming reply
+    omits the usage block — its `tokens` is the completion only, which is why the
+    record could not explain the local model's ~100x slowdown."""
+
+    def test_counts_string_content_only(self):
+        msgs = [{"role": "system", "content": "abc"}, {"role": "user", "content": "de"},
+                {"role": "user", "content": None}, {"no_content": True}]
+        self.assertEqual(prompt_size(msgs), {"prompt_chars": 5, "prompt_tokens_est": 2})
+
+    def test_empty_or_none_is_zero(self):
+        self.assertEqual(prompt_size(None)["prompt_chars"], 0)
+        self.assertEqual(prompt_size([])["prompt_chars"], 0)
 
 
 class LoopTest(unittest.TestCase):

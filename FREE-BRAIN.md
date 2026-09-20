@@ -876,6 +876,27 @@ stays coherent for 1,000 cycles, because the capacity to test that was not
 available for free — the failure mode that ended the curve is the provider
 cascade, which is an artifact of "always free", not of the loop.
 
+**Observability gap closed (2026-09-19).** The P6 record could not explain its
+own slowdown. A streaming reply's `tokens` is the *completion* only — nothing
+recorded how large the **request** was, so the ~100× local collapse had no
+attributable cause in the data. And coherence alone cannot separate a *stable*
+self-model from a loop that reached a **fixed point and stopped rewriting**. Every
+cycle now records `prompt_chars` / `prompt_tokens_est` (measured from the request
+we send, so it is identical for every provider), plus `graph_changed`,
+`graph_novel`, and `distinct_graph_hashes`. A three-cycle smoke run shows the
+shape at once: prompt size grew **2326 → 2686 → 3048 chars** (~360 chars/cycle —
+context creep *on the record*), while the plan was already **non-novel by cycle
+2**. Offline re-analysis of the completed P6 ledger also quantifies the fixed
+point: the dispatch graph changed on only **8.4%** of cycles following an
+accepted rewrite, last changed at **cycle 231**, and sat on one hash for
+**712/744** hashed cycles. **The gates reward sameness** — `retention` (0.30) plus
+`stability` (0.20) is half of the coherence functional and nothing rewards
+change — so the loop converges to a fixed point *by construction*, and a
+"coherent 1,000 cycles" result is close to guaranteed. **Q4 is therefore not yet
+falsifiable**: until the metric rewards coherent *change* rather than stasis, more
+cycles add no information, and the next run is worth running only after that is
+fixed.
+
 ---
 
 ## 10. Risks & honest constraints

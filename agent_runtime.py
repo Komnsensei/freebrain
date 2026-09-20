@@ -521,16 +521,41 @@ def _chat_stream_single(config, messages, temperature=None, max_tokens=None, tim
     }
 
 
+def prompt_size(messages):
+    """Size of the request we are about to SEND, measured before it is sent.
+
+    This is deliberately provider-agnostic and computed from the request itself,
+    because a streaming reply omits the usage block — so `tokens` in the reply is
+    only the *completion*, never the prompt. That gap hid a real failure mode: a
+    local model degraded ~100x over a run and nothing in the record could say
+    whether the prompt had grown. Prompt size is the number that explains a
+    context-creep slowdown, and it is the same number for every provider.
+
+    `prompt_tokens_est` is a rough chars/4 estimate, labelled `_est` so it is
+    never mistaken for a measured token count.
+    """
+    chars = 0
+    for m in messages or []:
+        content = m.get("content") if isinstance(m, dict) else None
+        if isinstance(content, str):
+            chars += len(content)
+    return {"prompt_chars": chars, "prompt_tokens_est": (chars + 3) // 4}
+
+
 def chat_stream(config, messages, temperature=None, max_tokens=None, timeout_s=None, stop_when=None):
     """Streaming chat completion across the brain cascade (brain_cascade.py).
 
     The local server is tried first; when it is down, or a free provider
     throttles or retires a model, the cascade moves to the next provider instead
     of failing the step. The reply carries `provider` (who answered) and
-    `attempts` (who failed and why) so every step is attributable in the ledger."""
+    `attempts` (who failed and why) so every step is attributable in the ledger.
+    It also carries the measured prompt size (see `prompt_size`)."""
     def call_one(provider):
         return _chat_stream_single(provider, messages, temperature, max_tokens, timeout_s, stop_when)
-    return brain_cascade.run_cascade(brain_cascade.chain(config), call_one, discover=list_models)
+    resp = brain_cascade.run_cascade(brain_cascade.chain(config), call_one, discover=list_models)
+    if isinstance(resp, dict):
+        resp.update(prompt_size(messages))
+    return resp
 
 
 def _chat_single(config, messages, temperature=None, max_tokens=None, timeout_s=None):
@@ -582,7 +607,10 @@ def chat(config, messages, temperature=None, max_tokens=None, timeout_s=None):
     messages: [{role, content}, ...]. Returns dict with provider attribution."""
     def call_one(provider):
         return _chat_single(provider, messages, temperature, max_tokens, timeout_s)
-    return brain_cascade.run_cascade(brain_cascade.chain(config), call_one, discover=list_models)
+    resp = brain_cascade.run_cascade(brain_cascade.chain(config), call_one, discover=list_models)
+    if isinstance(resp, dict):
+        resp.update(prompt_size(messages))
+    return resp
 
 
 PROBE_MAX_TOKENS = 1  # the cheapest request a provider can still refuse

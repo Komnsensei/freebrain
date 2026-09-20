@@ -80,7 +80,11 @@ class StubModel:
             return {"content": "", "elapsed": 0.0, "tokens": 0, "early_stop": False,
                     "truncated": False}
         r = self.replies.pop(0)
-        base = {"elapsed": 0.5, "tokens": 20, "early_stop": True, "truncated": False}
+        # Mirror the real chat_stream wrapper: the request size is measured from
+        # the messages we send, so the ledger's prompt fields are exercised here.
+        chars = sum(len(m.get("content", "")) for m in (messages or []) if isinstance(m, dict))
+        base = {"elapsed": 0.5, "tokens": 20, "early_stop": True, "truncated": False,
+                "prompt_chars": chars, "prompt_tokens_est": (chars + 3) // 4}
         if isinstance(r, dict):
             # scripted result override — used to simulate a budget-truncated call
             base.update(r)
@@ -255,6 +259,41 @@ class DriftLoopTest(unittest.TestCase):
         self.assertAlmostEqual(qih["phase_clock_dtau"], 0.025, places=6)
         self.assertNotIn("entanglement_distance", qih)  # no previous graph yet
         self.assertNotIn("coherence_c_mt", qih)         # window still empty
+
+    def test_ledger_records_prompt_size_every_cycle(self):
+        """The local model degraded ~100x over a run and the record could not say
+        whether the request had grown, because a streaming reply's `tokens` is the
+        COMPLETION only. Prompt size is measured from the request, so it exists for
+        every provider."""
+        self.assertIsInstance(self._one_cycle(), dict)
+        rec = self._ledger_records()[0]
+        self.assertGreater(rec["prompt_chars"], 0)
+        self.assertEqual(rec["prompt_tokens_est"], (rec["prompt_chars"] + 3) // 4)
+
+    def test_ledger_distinguishes_a_fixed_point_from_a_new_plan(self):
+        """A coherence curve cannot show this: a run can hold coherence 1.00 while
+        never changing its plan. `graph_changed`/`graph_novel` are what expose a
+        fixed point, and `distinct_graph_hashes` is how many plans the run has
+        actually used."""
+        stub = StubModel([GOOD_GRAPH_JSON, GOOD_REWRITE_JSON,
+                          GOOD_GRAPH_JSON, GOOD_REWRITE_JSON])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            run = self._run()
+            run.cycle()
+            run.cycle()
+        finally:
+            drift_loop.chat_stream = original
+        recs = self._ledger_records()
+        # cycle 1: the plan is new and there was no previous plan
+        self.assertTrue(recs[0]["graph_novel"])
+        self.assertTrue(recs[0]["graph_changed"])
+        self.assertEqual(recs[0]["distinct_graph_hashes"], 1)
+        # cycle 2: same plan → NOT novel, NOT changed. A fixed point, on the record.
+        self.assertFalse(recs[1]["graph_novel"])
+        self.assertFalse(recs[1]["graph_changed"])
+        self.assertEqual(recs[1]["distinct_graph_hashes"], 1)
 
     def test_ledger_qih_distance_across_cycles(self):
         """A changed dispatch graph between cycles yields a machine-checked
