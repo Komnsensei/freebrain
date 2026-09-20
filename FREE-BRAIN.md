@@ -2,7 +2,7 @@
 
 **Epistemic Status:** Experimental / Frontier R&D Framework
 **Target Domain:** Open-Weight Autonomous Agent Synthesis & Decentralized Cognitive Routing
-**Status:** research/design — rev 0.9 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 37+ cycles on phone-class hardware, coherence 1.00, sticky (not frozen) graph hash; Q1 throughput **corrected** — 0.13 tok/s was contention, ~6.3 tok/s measured idle (§1 correction); **Q1 evidence log audited** — 98% of its rows were test artifacts, leak closed and rows quarantined (`evidence_hygiene.py`, `test_support.py`); **P6 runtime** — three deployment paths: always-on Oracle kit (`deploy/oracle/`), a card-free GitLab CI pipeline (`.gitlab-ci.yml` + `deploy/gitlab/`), and a phone watchdog (`deploy/phone/`); both card-free CI paths terminate at account-level identity gates — a GitHub billing lock and GitLab identity verification — see §9)
+**Status:** research/design — rev 0.9 (Q1 evidence log from the P0 phone-CPU run; `agent_runtime.py` auto-captures per-step tokens/s; **Drive residence** — the agent's persistent home folder mirrored via rclone, reached only through the allowlisted `drive_sync` tool; **`drift_loop.py`** — the file-driven Q4 loop: residence files *are* the state machine, one cycle per `trigger` touch, dispatch-graph hashing, deterministic gates, AGENT-INTEGRITY breakers, resume-on-crash, Test 2 determinism battery; **first Q4 result** — 37+ cycles on phone-class hardware, coherence 1.00, sticky (not frozen) graph hash; **P6 result — the 1,000-cycle drift study COMPLETED** (run `435cb26603`: cycles 1–1000, one run id, 258 trips + 12 alarms auto-resumed and recorded; coherence 0.991 over cycles 1–100 while the cascade served, collapsing to 0 with the free tiers exhausted from ~cycle 800 — reported as provider exhaustion, not drift, see §9); Q1 throughput **corrected** — 0.13 tok/s was contention, ~6.3 tok/s measured idle (§1 correction); **Q1 evidence log audited** — 98% of its rows were test artifacts, leak closed and rows quarantined (`evidence_hygiene.py`, `test_support.py`); **P6 runtime** — three deployment paths: always-on Oracle kit (`deploy/oracle/`), a card-free GitLab CI pipeline (`.gitlab-ci.yml` + `deploy/gitlab/`), and a phone watchdog (`deploy/phone/`); both card-free CI paths terminate at account-level identity gates — a GitHub billing lock and GitLab identity verification — see §9)
 
 This document is the full decomposition of the research brief. It is written to be
 honest about what is established, what is plausible, and what is speculative — the
@@ -832,6 +832,49 @@ as an observation, not a verdict: a frozen graph hash with full coherence is
 *either* a stable self-model *or* a loop that stopped exploring, and only the
 completed 1,000-cycle curve (and Test 2) distinguishes those. **A flat line must
 be reported as a flat line.**
+
+**P6 result — the 1,000-cycle drift study (run `435cb26603`, completed
+2026-09-19).** The loop reached its target: **cycles 1–1000, one run id**, 999
+ledger rows (cycle 141 was lost to the `KeyError: 0` crash in §10 and is visible
+as that gap). 258 breaker trips and 12 drift alarms were auto-resumed in-process
+and are all recorded — none was hidden. Headline numbers, with the honest
+caveat that decides what they mean:
+
+| Segment | Accepted self-edits | Mean coherence | server-error cycles | cascade degraded/exhausted |
+|---|---|---|---|---|
+| 1–100 | **99.0%** | **0.991** | 0 | 0/100 |
+| 101–200 | 73.7% | 0.758 | 0 | 59/99 |
+| 201–300 | 25.0% | 0.289 | 0 | 100/100 |
+| 301–800 | 22–53% | 0.32–0.59 | 0–15 | 100/100 |
+| 801–900 | **0.0%** | 0.052 | **100** | 100/100 |
+| 901–1000 | **0.0%** | 0.007 | **100** | 100/100 |
+
+**The late collapse is not cognitive drift — it is the free providers giving
+out.** From cycle 801 onward every cycle recorded a `server-error`, and the
+cascade reported `degraded`/`exhausted` for essentially the whole run after
+cycle 200. So the curve must be read in two parts: while the cascade served
+requests the loop held **coherence 0.99 with 99% of self-edits accepted
+(cycles 1–100)**; once the free tiers were exhausted the gate-rejection metrics
+collapse for infrastructure reasons, not because the self-model wandered. **An
+unconfounded 1,000-cycle coherence curve requires paid or self-hosted capacity
+for the tail** — reporting the tail as "drift" would be a misattribution, and
+reporting the whole run as "coherent" would be worse.
+
+**Test-2 (graph stability) is a flat line, and it is reported as one.** The
+dispatch graph produced **17 distinct hashes across 744 hashed cycles, and 712
+of them are the identical hash** `d477938e…` — the same hash the first Q4 result
+froze at, so the loop settled onto one execution graph early and did not explore
+further. That is exactly the ambiguity already flagged: a frozen hash is *either*
+a stable self-model *or* a loop that stopped exploring, and the 1,000-cycle
+curve alone does not separate them. It is an observation, not a verdict.
+
+**What P6 establishes, and what it does not.** It establishes that the loop
+**runs 1,000 continuous cycles unattended** on phone-class / free-tier hardware
+without human intervention, recording every trip and alarm, and that it is
+**coherent while its inference is sound**. It does **not** establish that it
+stays coherent for 1,000 cycles, because the capacity to test that was not
+available for free — the failure mode that ended the curve is the provider
+cascade, which is an artifact of "always free", not of the loop.
 
 ---
 

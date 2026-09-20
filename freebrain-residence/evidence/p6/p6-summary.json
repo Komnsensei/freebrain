@@ -1,0 +1,28 @@
+{
+  "run": "435cb26603",
+  "cycles": [
+    1,
+    1000
+  ],
+  "rows": 999,
+  "missing_cycles": [
+    141
+  ],
+  "accepted_self_edits": 416,
+  "coherence": {
+    "mean": 0.461,
+    "median": 0.25,
+    "first_100_mean": 0.991,
+    "last_100_mean": 0.007
+  },
+  "graph_hashes": {
+    "distinct": 17,
+    "hashed_cycles": 744,
+    "most_common_share": 0.957
+  },
+  "trips": 258,
+  "drift_alarms": 12,
+  "server_error_cycles": 227,
+  "cascade_exhausted_cycles": 227,
+  "caveat": "late-run coherence collapse coincides with free-provider exhaustion; not demonstrated cognitive drift"
+}

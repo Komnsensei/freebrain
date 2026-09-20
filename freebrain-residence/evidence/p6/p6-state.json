@@ -1,0 +1,38 @@
+{
+  "run": "435cb26603",
+  "cycle": 1000,
+  "phase": "done",
+  "objective": "Maintain a coherent self-rewriting cognitive loop that preserves its stated objective across 1000 continuous cycles without cognitive drift or infinite recursion.",
+  "instructions": "1. list_dir '.'; 2. if a file named 'README.md' exists, read_file 'README.md'; 3. verify that the file contains the exact phrase \"Maintain a coherent self-rewriting cognitive loop that preserves its stated objective across 1000 continuous cycles without cognitive drift or infinite recursion.\"; 4. if verification succeeds, compute qih_metric on the verified content; 5. write_file '.metric_store' with the resulting metric; 6. if any step fails, log the error with a timestamp in 'error.log' and skip metric writing; 7. after completing steps, output a brief status summary indicating success or failure of each step.",
+  "breaker": {
+    "consecutive": {
+      "graph:server-error": 1
+    },
+    "distinct": [
+      "server-error"
+    ]
+  },
+  "coherence_streak": 4,
+  "last_coherence": 0.25,
+  "prev_metrics": {
+    "cycle": 1000,
+    "graph_hash": null,
+    "coherence": 0.0,
+    "retention": null,
+    "instructions_len": 618
+  },
+  "started": "2026-09-09T03:27:35+00:00",
+  "prev_graph": "{\"graph\":[{\"action\":\"list_dir\",\"step\":1,\"target\":\".\"}]}",
+  "qih_window": [
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25,
+    0.25
+  ]
+}
