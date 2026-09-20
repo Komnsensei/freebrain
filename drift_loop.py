@@ -40,10 +40,14 @@ Usage:
     python3 drift_loop.py --max-seconds 19800            # stop cleanly before a hard kill
                                                          # (5.5 h on a 6 h CI runner)
 
+    python3 drift_loop.py --max-trips 400 --max-alarms 200  # survive 1000 cycles unattended:
+                                                         # auto-resume breaker trips + drift alarms
+
 Env: LOCAL_MODEL_URL / LOCAL_MODEL (see agent_runtime.py), DRIVE_RESIDENCE,
-DRIVE_REMOTE (rclone remote), FREE_BRAIN_OBJECTIVE, EVIDENCE_FILE.
+DRIVE_REMOTE (rclone remote), FREE_BRAIN_OBJECTIVE, EVIDENCE_FILE,
+FREE_BRAIN_MAX_TRIPS, FREE_BRAIN_MAX_ALARMS.
 Exit codes: 0 complete (or a clean stop on the --max-seconds budget), 2 breaker
-trip / drift alarm, 3 determinism fail.
+trip / drift alarm / refusal to fork the record, 3 determinism fail.
 """
 
 import argparse
@@ -430,6 +434,38 @@ class DriftRun:
             return None
         return event
 
+    def _operator_event(self, event):
+        """Append one operator event; bookkeeping must never kill the run."""
+        try:
+            with open(_operator_events_path(self.res), "a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception as exc:
+            print("[drift] warning: could not record the operator event: %s" % exc)
+        return event
+
+    def clear_alarm(self, msg):
+        """Operator reset for a DRIFT ALARM — continue the SAME run id.
+
+        A drift alarm is a recorded OUTCOME (coherence sat below the floor for
+        DRIFT_STREAK cycles), not corruption. An unattended 1000-cycle study with
+        a noisy hosted model reaches it occasionally, so the operator may choose
+        to record it and continue rather than lose the run. The alarm stays in the
+        ledger and the run id is unchanged; only the streak counter resets, since
+        that is what the alarm is computed from. Written to operator-events.jsonl
+        as `drift-alarm-reset` — distinct from a breaker `operator-reset` — so the
+        record shows the alarm rate instead of hiding it.
+        """
+        cleared = {"coherence_streak": self.state.get("coherence_streak"),
+                   "last_coherence": self.state.get("last_coherence"),
+                   "qih_window": list(getattr(self, "qih_window", []) or [])}
+        self.state["coherence_streak"] = 0
+        self.state["phase"] = "running"
+        self._save()
+        return self._operator_event({
+            "ts": _now(), "run": self.run, "cycle": self.state["cycle"],
+            "event": "drift-alarm-reset", "alarm": msg, "cleared": cleared,
+        })
+
     # -- QIH metrics (machine-computed from measured cycle data; QIH.md §II) --
 
     def _qih_metrics(self, graph_ok, graph, r1, r2, coherence):
@@ -640,13 +676,16 @@ class DriftRun:
 
     # -- runners --
 
-    def run_cycles(self, cycles, resume=True, deadline=None):
+    def run_cycles(self, cycles, resume=True, deadline=None, max_trips=0, max_alarms=0):
         if resume:
             loaded = DriftRun.load(self.config, self.objective, self.res)
             if loaded is not None and loaded.state["cycle"] < cycles:
-                return loaded.run_cycles(cycles, resume=False, deadline=deadline)
+                return loaded.run_cycles(cycles, resume=False, deadline=deadline,
+                                         max_trips=max_trips, max_alarms=max_alarms)
         start = self.state["cycle"] + 1
         ran = 0
+        trips = 0
+        alarms = 0
         for c in range(start, cycles + 1):
             # Ephemeral hosts (CI runners) get hard-killed at a wall, and a kill
             # mid-run loses every cycle the host never got to persist. So stop
@@ -664,6 +703,30 @@ class DriftRun:
             result = self.cycle()
             self._touch_next()
             if isinstance(result, str):
+                # A mid-run trip is a NORMAL outcome for a 1000-cycle study, not a
+                # decision to discard the run: a hosted model emits malformed JSON
+                # occasionally and two in a row trips `consecutive-same-signature`.
+                # This loop used to return 2 here, which the watchdog treated as
+                # terminal — so auto-resume could never actually resume, and the
+                # study stalled every few cycles (measured on the phone: trips at
+                # cycle 159, 168, 173, 177). With --max-trips N it records the trip
+                # and continues the SAME run in-process, which also avoids a
+                # process restart per trip. The cap keeps a genuinely pathological
+                # run (a model that only ever emits garbage) from grinding forever.
+                if result.startswith("TRIP") and max_trips and trips < max_trips:
+                    trips += 1
+                    print("[drift] cycle %d — %s" % (c, result))
+                    print("[drift] auto-resume %d/%d — recording the trip and continuing run %s"
+                          % (trips, max_trips, self.run))
+                    self.clear_trip()
+                    continue
+                if result.startswith("DRIFT ALARM") and max_alarms and alarms < max_alarms:
+                    alarms += 1
+                    print("[drift] cycle %d — %s" % (c, result))
+                    print("[drift] alarm-resume %d/%d — recording the alarm and continuing run %s"
+                          % (alarms, max_alarms, self.run))
+                    self.clear_alarm(result)
+                    continue
                 print("[drift] cycle %d — %s" % (c, result))
                 return 2
             print("[drift] cycle %d gate=%s coherence=%.2f hash=%s" % (
@@ -672,8 +735,9 @@ class DriftRun:
         # `cycles` is an absolute TARGET cycle, not a count — so state at cycle 141
         # with --cycles 1 executes nothing (the range is empty). Reporting the
         # target as if it were the number run claimed work that never happened.
-        print("[drift] complete: target cycle %d (%d cycle(s) run this invocation; ledger in %s)"
-              % (cycles, ran, _ledger_path(self.res)))
+        print("[drift] complete: target cycle %d (%d cycle(s) run, %d trip(s) and %d alarm(s) "
+              "auto-resumed this invocation; ledger in %s)"
+              % (cycles, ran, trips, alarms, _ledger_path(self.res)))
         return 0
 
     def watch(self, max_cycles=None):
@@ -749,6 +813,15 @@ def main(argv=None):
     parser.add_argument("--temperature", type=float, default=None, help="pinned temperature (determinism battery)")
     parser.add_argument("--max-seconds", type=int, default=None, metavar="N",
                         help="stop cleanly before N seconds elapse — for ephemeral hosts with a hard kill")
+    parser.add_argument("--max-trips", type=int, default=int(os.environ.get("FREE_BRAIN_MAX_TRIPS") or 0),
+                        metavar="N",
+                        help="auto-resume up to N mid-run breaker trips in-process (same run id); "
+                             "0 disables and a trip exits 2. Trip/cooldown posture is unchanged.")
+    parser.add_argument("--max-alarms", type=int, default=int(os.environ.get("FREE_BRAIN_MAX_ALARMS") or 0),
+                        metavar="N",
+                        help="auto-resume up to N DRIFT ALARMs in-process (same run id), recorded as "
+                             "drift-alarm-reset events; 0 disables and an alarm exits 2. A drift "
+                             "alarm is an outcome, and this never changes the coherence floor.")
     args = parser.parse_args(argv)
 
     load_env_file()  # credentials from .env (environment variables win)
@@ -797,7 +870,8 @@ def main(argv=None):
 
     if args.watch:
         return run.watch()
-    return run.run_cycles(args.cycles, deadline=deadline)
+    return run.run_cycles(args.cycles, deadline=deadline, max_trips=args.max_trips,
+                          max_alarms=args.max_alarms)
 
 
 if __name__ == "__main__":

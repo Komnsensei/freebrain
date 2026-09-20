@@ -331,6 +331,126 @@ class DriftLoopTest(unittest.TestCase):
             st = json.load(f)
         self.assertEqual(st["phase"], "tripped")
 
+    # ── auto-resume (a trip must not end the study) ────────────────────────
+
+    def test_a_trip_exits_2_without_max_trips(self):
+        """The guard stays a guard: with no --max-trips a mid-run trip still
+        returns 2 so an operator is prompted instead of a study grinding on."""
+        stub = StubModel(["nope", "nope", GOOD_GRAPH_JSON, GOOD_REWRITE_JSON])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            code = self._run().run_cycles(3)
+        finally:
+            drift_loop.chat_stream = original
+        self.assertEqual(code, 2)
+        self.assertEqual(len(self._ledger_records()), 2)  # the trip is still recorded
+        with open(os.path.join(self.res, "state.json")) as f:
+            self.assertEqual(json.load(f)["phase"], "tripped")
+
+    def test_max_trips_auto_resumes_in_process_and_keeps_the_run_id(self):
+        """Measured on the phone: the loop returned 2 on every mid-run trip while
+        the watchdog treated 2 as terminal, so auto-resume could never resume and
+        the study stalled every few cycles (trips at 159, 168, 173, 177). With
+        --max-trips the trip is recorded, the SAME run continues in-process, and
+        the study reaches its target."""
+        stub = StubModel(["nope", "nope", GOOD_GRAPH_JSON, GOOD_REWRITE_JSON])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            run = self._run()
+            run_id = run.run
+            code = run.run_cycles(3, max_trips=1)
+        finally:
+            drift_loop.chat_stream = original
+        self.assertEqual(code, 0)                       # reached the target
+        recs = self._ledger_records()
+        self.assertEqual([r["cycle"] for r in recs], [1, 2, 3])
+        self.assertEqual(recs[1]["graph_sig"], "graph:missing-key")
+        self.assertIn("TRIP", recs[1]["breaker"])      # the trip is in the record
+        self.assertEqual({r["run"] for r in recs}, {run_id})  # never forked
+        # the reset is an operator event, not a ledger row — schema stays stable
+        with open(os.path.join(self.res, "operator-events.jsonl")) as f:
+            events = [json.loads(ln) for ln in f if ln.strip()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "operator-reset")
+        self.assertEqual(events[0]["run"], run_id)
+        with open(os.path.join(self.res, "state.json")) as f:
+            self.assertEqual(json.load(f)["phase"], "done")
+
+    def test_max_trips_cap_still_stops_a_pathological_run(self):
+        """A model that only ever emits garbage must not grind to 1000 cycles:
+        past the cap the run stops and returns 2 for a human."""
+        stub = StubModel(["nope"] * 40)  # every cycle trips again
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            code = self._run().run_cycles(1000, max_trips=2)
+        finally:
+            drift_loop.chat_stream = original
+        self.assertEqual(code, 2)
+        self.assertLessEqual(len(self._ledger_records()), 6)
+
+    # ── drift alarm (also a stop-and-ask outcome, also recoverable) ─────────
+
+    BAD_REWRITE_JSON = json.dumps({"instructions": "Just check the weather.", "rationale": "x"})
+
+    def _tripped_alarm_run(self):
+        """One more sub-floor cycle after DRIFT_STREAK-1 of them → DRIFT ALARM.
+        A single rejected rewrite cannot trip the breaker, so this isolates the
+        ALARM path from the TRIP path."""
+        stub = StubModel([GOOD_GRAPH_JSON, self.BAD_REWRITE_JSON])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            run = self._run()
+            run.state["coherence_streak"] = drift_loop.DRIFT_STREAK - 1
+            return run
+        finally:
+            drift_loop.chat_stream = original
+
+    def test_drift_alarm_exits_2_without_max_alarms(self):
+        run = self._tripped_alarm_run()
+        stub = StubModel([GOOD_GRAPH_JSON, self.BAD_REWRITE_JSON])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            code = run.run_cycles(1, resume=False)
+        finally:
+            drift_loop.chat_stream = original
+        self.assertEqual(code, 2)
+        with open(os.path.join(self.res, "state.json")) as f:
+            self.assertEqual(json.load(f)["phase"], "drift")
+
+    def test_max_alarms_resumes_and_records_the_alarm_distinctly(self):
+        """A drift alarm is an outcome, not corruption. --max-alarms records it as
+        `drift-alarm-reset` (distinct from a breaker reset) and continues the SAME
+        run, keeping the alarm in the ledger and never moving the coherence floor."""
+        run = self._tripped_alarm_run()
+        run_id = run.run
+        stub = StubModel([GOOD_GRAPH_JSON, self.BAD_REWRITE_JSON])
+        original = drift_loop.chat_stream
+        drift_loop.chat_stream = stub
+        try:
+            code = run.run_cycles(1, resume=False, max_alarms=1)
+        finally:
+            drift_loop.chat_stream = original
+        self.assertEqual(code, 0)
+        recs = self._ledger_records()
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0]["run"], run_id)          # never forked
+        self.assertLess(recs[0]["coherence"], drift_loop.COHERENCE_FLOOR)
+        with open(os.path.join(self.res, "operator-events.jsonl")) as f:
+            events = [json.loads(ln) for ln in f if ln.strip()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "drift-alarm-reset")
+        self.assertEqual(events[0]["run"], run_id)
+        self.assertIn("DRIFT ALARM", events[0]["alarm"])
+        with open(os.path.join(self.res, "state.json")) as f:
+            st = json.load(f)
+        self.assertEqual(st["coherence_streak"], 0)        # the streak is what resets
+        self.assertEqual(st["phase"], "running")
+
     # ── resume / watch / determinism ───────────────────────────────────────
 
     def test_resume_continues_cycle_number(self):

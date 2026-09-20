@@ -877,6 +877,27 @@ self-edit.
   intervention in `operator-events.jsonl` so the ledger's evidence schema stays
   untouched, while `--no-resume` starts a new study. The phone watchdog treats
   exit 2 as terminal and stops, rather than restarting a refusal forever.
+- **Auto-resume could never actually resume — the loop and its supervisor
+  disagreed about the same exit code.** `run_cycles()` returned **2** on a
+  mid-run breaker trip, and the watchdog had been taught that **2** means "a
+  refusal no restart can fix", so every trip stopped the study instead of
+  resuming it. The trip rate made this terminal: measured on the phone,
+  2026-09-19, the breaker tripped at cycles 159, 168, 173 and 177 — roughly one
+  trip per 5 cycles — so the run could never have reached 1,000. The fix is
+  `--max-trips N`: a mid-run trip is recorded and the **same run continues
+  in-process**, which also removes a process restart per trip. Exit 2 now means
+  only what the watchdog assumes — a genuinely unresumable refusal, or the
+  auto-resume cap being reached (the guard against a model that does nothing but
+  emit garbage). A **DRIFT ALARM** is the same shape of outcome, so
+  `--max-alarms N` records it as a distinct `drift-alarm-reset` event and
+  continues; it never moves the coherence floor, and the alarm stays in the
+  ledger. Both counters live in `operator-events.jsonl`, so the record shows the
+  trip and alarm *rates* instead of a run that looks uninterrupted.
+- **Measured effect (2026-09-19, phone, cascade-only).** Before the fix the run
+  stalled every few cycles and averaged ~30 s/cycle when it moved at all; after
+  it the same run advanced **112 cycles in 180 s (~1.6 s/cycle)** with 43 trips
+  and 1 drift alarm auto-resumed in-process, same run id. Three of the new
+  regression tests fail against the previous code.
 - **Isolation is an arms race.** Container escapes get discovered over time; the
   T7-class threat re-runs on every update. Defense in depth: the guard treats
   container output as data.
