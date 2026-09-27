@@ -76,7 +76,12 @@ DEFAULT_CONFIG = {
     "fusion": "linear",
     "index_headings": True,      # index the heading trail with the body text
     # retrieval confidence gate — see query_support(). 0 disables it.
-    "min_query_support": 0.55,
+    # 0.60 is the measured boundary for the current 65231-byte FREE-BRAIN
+    # plus 9-file corpus (237 chunks). At 0.55 the larger corpus left
+    # rag-n02/n03 with false_answer 0.67 (refusal 0.88); at 0.58 it reaches
+    # 1.00. 0.60 keeps margin inside the 0.58-0.65 window where refusal is
+    # perfect without pushing into false_refusal territory.
+    "min_query_support": 0.60,
     # grounding audit
     "support_threshold": 0.34,   # content-word recall required to call a sentence supported
     "max_unsupported_rate": 0.34,

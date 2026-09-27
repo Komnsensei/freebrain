@@ -1,0 +1,12 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "Free Brain RAG",
+  "name_for_model": "free_brain_rag",
+  "description_for_human": "Grounded retrieval over the Free Brain corpus — search, ask with citations, and build the index. Answers are audited; insufficient context returns INSUFFICIENT_CONTEXT instead of guessing.",
+  "description_for_model": "Search the Free Brain corpus (FREE-BRAIN.md, AGENT-INTEGRITY.md, QIH, residences), or ask a question and get a grounded answer with citations and audit metadata. Use search to retrieve source chunks with spans, ask for a cited answer (refuses when context is insufficient). Every answer carries citation_fidelity, query_support, and a hard gate verdict.",
+  "auth": { "type": "none" },
+  "api": { "type": "openapi", "url": "http://localhost:8080/openapi.json", "is_user_authenticated": false },
+  "logo_url": "http://localhost:8080/logo.png",
+  "contact_email": "freebrain@freebuff.com",
+  "legal_info_url": "https://freebuff.com/legal"
+}

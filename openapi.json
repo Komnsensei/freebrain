@@ -1,0 +1,111 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "Free Brain — OpenChat + Indexing Plugin",
+    "description": "Grounded chat and lexical indexing for the Free Brain corpus. Every factual sentence is citable; ask re-derives grounding from retrieved chunks and refuses with INSUFFICIENT_CONTEXT when support is below threshold.",
+    "version": "1.0.0"
+  },
+  "servers": [{ "url": "http://localhost:8080" }],
+  "paths": {
+    "/api/search": {
+      "post": {
+        "operationId": "search",
+        "summary": "Lexical+dense retrieval — the indexing plugin entrypoint",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": { "type": "string", "description": "query text" },
+                  "k": { "type": "integer", "default": 6, "description": "top-k" }
+                },
+                "required": ["query"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "hits with citation [n], source, span, score, channels, text" } }
+      }
+    },
+    "/api/ask": {
+      "post": {
+        "operationId": "ask",
+        "summary": "Grounded retrieval → gate → generate → audit",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "question": { "type": "string" },
+                  "k": { "type": "integer", "default": 6 },
+                  "generator": { "type": "string", "enum": ["live", "extractive"], "default": "live" }
+                },
+                "required": ["question"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "answer, citations, citation_fidelity, query_support, verdict, refused, sources" } }
+      }
+    },
+    "/api/chat": {
+      "post": {
+        "operationId": "chat",
+        "summary": "OpenChat — grounded chat with optional streaming (SSE)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "role": { "type": "string", "enum": ["system", "user", "assistant"] },
+                        "content": { "type": "string" }
+                      }
+                    }
+                  },
+                  "stream": { "type": "boolean", "default": false },
+                  "use_rag": { "type": "boolean", "default": true },
+                  "temperature": { "type": "number" },
+                  "max_tokens": { "type": "integer" }
+                },
+                "required": ["messages"]
+              }
+            }
+          }
+        },
+        "responses": { "200": { "description": "content/answer + audit when use_rag=true; SSE when stream=true" } }
+      }
+    },
+    "/api/build": {
+      "post": {
+        "operationId": "buildIndex",
+        "summary": "Rebuild the hybrid index from the corpus",
+        "responses": { "200": { "description": "{chunks, files, bytes, config}" } }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Server + index + cascade health",
+        "responses": { "200": { "description": "{ok, index, cascade, version, time}" } }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "operationId": "chatCompletions",
+        "summary": "OpenAI-compatible chat (grounded when use_rag not false)",
+        "responses": { "200": { "description": "OpenAI shape + audit + provider" } }
+      }
+    }
+  }
+}
