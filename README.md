@@ -207,6 +207,8 @@ freebrain-residence/rag/index.json ← derived index (chunks only; vectors rebui
 agent_runtime.py + brain_cascade.py ← brain: local OpenAI-compatible + free-tier failover + streaming
 loop_guard.py / autonomy.py     ← tool loop instrumentation + goal-directed verify→gate
 drift_loop.py                   ← file-driven Q4 loop (state.json / ledger.jsonl / instructions.md)
+toolchain.py                    ← the verified action plane: manifest → static → sandbox → verify → promote (P1)
+PLAN-P1.md                      ← P1 plan + enforcement truth table
 FREE-BRAIN.md / AGENT-INTEGRITY.md / QIH.md … ← indexed corpus (RAG_CORPUS)
 ```
 
@@ -224,5 +226,6 @@ FREE-BRAIN.md / AGENT-INTEGRITY.md / QIH.md … ← indexed corpus (RAG_CORPUS)
 
 * `FREE-BRAIN.md` — the full decomposition of the brief (epistemics, falsifiability tests, roadmap).
 * `AGENT-INTEGRITY.md` — ledger / breaker / compaction design.
+* `PLAN-P1.md` — the verified action plane (FREE-BRAIN.md §6.1/§6.2): design, what is enforced at what strength, and the P2–P4 roadmap.
 * `.agents/skills/builderbro-rag/SKILL.md` — the RAG skill contract (`build | search | ask | eval | diagnose | contract`).
 * `deploy/{oracle,gitlab,phone}` — long-running and CI runners for the 1,000-cycle study.

@@ -34,6 +34,19 @@ import agent_runtime
 import autonomy
 import loop_guard
 
+# The goal-audit arm runs `run_goal` against a *stubbed* provider, and
+# `agent_runtime._emit_step` records every step to the residence's evidence log.
+# Measured 2026-10-07: one `python3 loop_audit.py --goals` from the repo root
+# appended 144 `provider: "stub"` rows to the published
+# `freebrain-residence/evidence/q1-evidence.jsonl` — the same leak the suites
+# close with `test_support.isolate_residence()` (58% of that file was already
+# stub rows before). A stub measurement is not Q1 evidence, so the audit points
+# its default residence at a throwaway dir. `--register` is unaffected: the
+# thresholds file (`loop_guard.json`) and `SELF_IMPROVEMENT_LOG.md` are cwd-
+# relative, not residence-relative.
+import test_support
+test_support.isolate_residence()
+
 
 # ── Scripted model behaviours ─────────────────────────────────────────────────
 # Each returns the next assistant message given the step index.

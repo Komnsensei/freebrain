@@ -367,7 +367,8 @@ class CascadeWiringTest(unittest.TestCase):
         # Ambient provider keys must never leak into these tests, and the real
         # chain must stay out of the way — each test injects its own.
         self.saved_env = {}
-        for var in ("BRAIN_CASCADE", "BRAIN_HEALTH_FILE", "DRIVE_RESIDENCE", "EVIDENCE_FILE"):
+        for var in ("BRAIN_CASCADE", "BRAIN_HEALTH_FILE", "DRIVE_RESIDENCE",
+                    "EVIDENCE_FILE", "BRAIN_SKIP_EMPTY_LOCAL"):
             self.saved_env[var] = os.environ.get(var)
         for provider in brain_cascade.PROVIDER_REGISTRY:
             for var in provider["key_envs"]:
@@ -377,6 +378,8 @@ class CascadeWiringTest(unittest.TestCase):
         os.environ["DRIVE_RESIDENCE"] = self.tmp
         os.environ.pop("BRAIN_CASCADE", None)  # default = cascade enabled
         os.environ.pop("EVIDENCE_FILE", None)
+        # Deterministic chain: never consult a live local server (probe off).
+        os.environ["BRAIN_SKIP_EMPTY_LOCAL"] = "0"
         self.addCleanup(self._restore_env)
 
     def _restore_env(self):
@@ -591,7 +594,11 @@ class EnvFileTest(unittest.TestCase):
 
     def test_loaded_keys_reach_the_cascade(self):
         self._write("GROQ_API_KEY=gsk_one\nGROQ_API_KEY_2=gsk_two\nGROQ_API_KEY_3=gsk_three\n")
-        env = {"BRAIN_HEALTH_FILE": os.path.join(self.tmp, "health.json")}
+        # Pin the local hop ON: `chain()` defaults to skipping a local server
+        # that answers /models with nothing (a live probe), which would drop
+        # `local` on a machine with no Ollama and fail this for the wrong reason.
+        env = {"BRAIN_HEALTH_FILE": os.path.join(self.tmp, "health.json"),
+               "BRAIN_SKIP_EMPTY_LOCAL": "0"}
         agent_runtime.load_env_file(paths=[self.path], env=env)
         names = [e["name"] for e in brain_cascade.chain(_config(), env)]
         self.assertEqual(names, ["local", "groq", "groq#2", "groq#3"])

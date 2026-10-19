@@ -79,6 +79,7 @@ import uuid
 import brain_cascade
 import loop_guard
 import qih_metrics
+import toolchain
 
 USER_AGENT = "FreeBrain/1.0 (autonomous agent harness; +https://freebuff.com)"
 
@@ -1005,6 +1006,49 @@ def _tool_rag(arg, env=None):
     return "rag %s: ok=%s" % (command, result.get("ok"))
 
 
+TOOLCHAIN_USAGE = (
+    "run_toolchain usage: run_toolchain <name>  — runs the gated, sandboxed "
+    "tool-chain in <residence>/generated/<name>/ (manifest.json + entrypoint)"
+)
+
+
+def _tool_run_toolchain(arg, env=None):
+    """The verified action plane (FREE-BRAIN.md §6.1/§6.2, P1).
+
+    The model may *build* a tool-chain into the residence's `generated/` dir, but
+    it never runs one directly: this tool hands the directory to
+    `toolchain.run_dir`, which walks the gate chain (manifest → static → sandbox
+    → verify → promote). A rejection comes back as the canonical structured
+    failure, never as raw output to smooth over, and a promotion is written to
+    the ledger by the gate chain (`howVerified: "gateChain"`).
+
+    Scope is the residence's `generated/` directory alone — no absolute paths,
+    no `..`, no symlink escape. That mirrors the `drive_sync` write-scope rule:
+    the model's reach is a directory, not the filesystem.
+    """
+    env = env if env is not None else os.environ
+    name = (arg or "").strip()
+    if not name:
+        return loop_guard.fail(TOOLCHAIN_USAGE)
+    parts = name.replace("\\", "/").split("/")
+    if os.path.isabs(name) or name.startswith("~") or ".." in parts or parts[0] in ("", "."):
+        return loop_guard.fail(
+            "toolchain scope: path must be a name under generated/ (got %r)" % name)
+    root = os.path.realpath(os.path.join(residence_path(env), "generated"))
+    target = os.path.realpath(os.path.join(root, name))
+    if target != root and not target.startswith(root + os.sep):
+        return loop_guard.fail(
+            "toolchain scope: path escapes generated/ (got %r)" % name)
+    if not os.path.isdir(target):
+        return loop_guard.fail(
+            "toolchain: no such tool-chain directory: generated/%s" % name)
+    result = toolchain.run_dir(target, env=env)
+    if not result.get("ok"):
+        return loop_guard.fail(
+            "step=%s reason=%s" % (result.get("step"), result.get("reason")))
+    return toolchain.format_result(result)
+
+
 class Tool(collections.namedtuple("Tool", "fn probe")):
     """One registered tool: its implementation and an argument that must fail.
 
@@ -1038,6 +1082,8 @@ TOOLS = {
     "drive_sync": Tool(_tool_drive_sync, "not-a-subcommand"),
     "qih_metric": Tool(_tool_qih_metric, ""),
     "rag": Tool(_tool_rag, ""),
+    # An empty argument is rejected before any path is resolved.
+    "run_toolchain": Tool(_tool_run_toolchain, ""),
 }
 
 
@@ -1084,8 +1130,10 @@ def run_goal(config, goal, max_steps=MAX_STEPS, persona="Free Brain", guard=None
     messages = [{
         "role": "system",
         "content": (
-            "You are a local autonomous agent (%s). You have these "
-            "read-only tools: %s. To inspect the environment, reply with ONLY "
+            "You are a local autonomous agent (%s). You have these tools: %s "
+            "(list_dir/read_file/drive_sync/qih_metric/rag are read-only; "
+            "run_toolchain runs a gated, sandboxed tool-chain from the "
+            "residence's generated/ dir). To use one, reply with ONLY "
             "a tool call line like <<<TOOL:list_dir .>>> (no extra text). "
             "After seeing the tool output, reply with your final answer "
             "prefixed with FINAL: . Never describe tool syntax — just use it. "

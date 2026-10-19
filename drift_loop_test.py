@@ -117,6 +117,9 @@ class DriftLoopTest(unittest.TestCase):
         drift test — the snapshot reads whichever health file the process has."""
         saved = dict(os.environ)
         os.environ["BRAIN_HEALTH_FILE"] = os.path.join(self.tmp, "provider-health.json")
+        # Pin the local hop ON — the default skip-empty-local probes a live
+        # server, which would make these tests depend on whether Ollama is up.
+        os.environ["BRAIN_SKIP_EMPTY_LOCAL"] = "0"
         for provider in brain_cascade.PROVIDER_REGISTRY:
             for var in provider["key_envs"]:
                 os.environ.pop(var, None)

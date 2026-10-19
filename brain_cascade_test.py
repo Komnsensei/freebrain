@@ -43,6 +43,12 @@ def _env(tmp, **over):
     env = {
         "DRIVE_RESIDENCE": os.path.join(tmp, "residence"),
         "BRAIN_HEALTH_FILE": os.path.join(tmp, "provider-health.json"),
+        # Pin the local hop ON. `chain()` defaults to skipping a local server
+        # that reports no models (a live /models probe); without this a test
+        # run on a machine with no Ollama would silently drop `local` and
+        # every chain assertion would fail for a reason unrelated to what it
+        # tests. The skip behaviour has its own test (see SkipEmptyLocalTest).
+        "BRAIN_SKIP_EMPTY_LOCAL": "0",
     }
     env.update(over)
     return env
@@ -563,6 +569,87 @@ class FormatChainTest(unittest.TestCase):
         out = bc.format_chain(_config(), _env(self.tmp, BRAIN_CASCADE="0", GROQ_API_KEY="a"))
         self.assertIn("disabled", out)
         self.assertNotIn("[2]", out)
+
+
+class SkipEmptyLocalTest(unittest.TestCase):
+    """`BRAIN_SKIP_EMPTY_LOCAL` (default on) drops a local server that reports
+    no models when a cloud hop is available — but it must never probe when the
+    flag is off, and it must never drop local when there is no cloud hop."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cascade-skip-local-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.original = bc.local_has_models
+        self.addCleanup(lambda: setattr(bc, "local_has_models", self.original))
+
+    def test_empty_local_is_skipped_when_a_cloud_hop_exists(self):
+        bc.local_has_models = lambda config, timeout_s=1.5: False
+        env = _env(self.tmp, GROQ_API_KEY="a", BRAIN_SKIP_EMPTY_LOCAL="1")
+        names = [e["name"] for e in bc.chain(_config(), env)]
+        self.assertEqual(names, ["groq"])
+
+    def test_a_live_local_server_keeps_priority(self):
+        bc.local_has_models = lambda config, timeout_s=1.5: True
+        env = _env(self.tmp, GROQ_API_KEY="a", BRAIN_SKIP_EMPTY_LOCAL="1")
+        self.assertEqual([e["name"] for e in bc.chain(_config(), env)], ["local", "groq"])
+
+    def test_without_a_cloud_hop_local_is_never_probed(self):
+        def explode(config, timeout_s=1.5):
+            raise AssertionError("local must not be probed when there is no cloud hop")
+        bc.local_has_models = explode
+        env = _env(self.tmp, BRAIN_SKIP_EMPTY_LOCAL="1")  # no provider keys
+        self.assertEqual([e["name"] for e in bc.chain(_config(), env)], ["local"])
+
+    def test_the_flag_off_never_probes(self):
+        def explode(config, timeout_s=1.5):
+            raise AssertionError("BRAIN_SKIP_EMPTY_LOCAL=0 must not probe")
+        bc.local_has_models = explode
+        env = _env(self.tmp, GROQ_API_KEY="a", BRAIN_SKIP_EMPTY_LOCAL="0")
+        self.assertEqual([e["name"] for e in bc.chain(_config(), env)], ["local", "groq"])
+
+
+class AttributionTest(unittest.TestCase):
+    """A reply must name the hop that served it and the hops that failed first —
+    the evidence log's `provider` / `provider_key` / `failovers` columns depend
+    on it (FREE-BRAIN.md §5, §1)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cascade-attribution-test-")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.env = _env(self.tmp, GROQ_API_KEY="a", CEREBRAS_API_KEY="b")
+        self.chain = bc.chain(_config(), self.env)
+
+    def test_the_serving_hop_is_named(self):
+        reply = bc.run_cascade(self.chain, lambda p: {"content": "hi", "elapsed": 0.1,
+                                                      "tokens": 2}, env=self.env)
+        self.assertEqual(reply["provider"], "local")
+        self.assertEqual(reply["provider_url"], "http://127.0.0.1:11434/v1")
+        # local uses the LOCAL_MODEL_URL credential name, never a key value
+        self.assertEqual(reply["provider_key"], "LOCAL_MODEL_URL")
+        self.assertEqual(reply["attempts"], [])
+
+    def test_a_failover_records_the_failed_hop_as_a_dict(self):
+        def call_one(provider):
+            if provider["name"] == "local":
+                raise RuntimeError("local unreachable at http://x (refused)")
+            return {"content": "hi", "elapsed": 0.2, "tokens": 5}
+        reply = bc.run_cascade(self.chain, call_one, env=self.env)
+        self.assertEqual(reply["provider"], "groq")
+        self.assertEqual(reply["provider_key"], "GROQ_API_KEY")
+        self.assertEqual(len(reply["attempts"]), 1)
+        first = reply["attempts"][0]
+        self.assertEqual(first["provider"], "local")
+        self.assertEqual(first["class"], "server")
+        self.assertGreater(first["cooldown_s"], 0)
+
+    def test_the_exhaustion_error_names_every_hop_and_class(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            bc.run_cascade(self.chain, lambda p: (_ for _ in ()).throw(
+                RuntimeError("%s HTTP 429 - rate limit" % p["name"])), env=self.env)
+        msg = str(ctx.exception)
+        self.assertIn("cascade exhausted (3 providers)", msg)
+        for name in ("local", "groq", "cerebras"):
+            self.assertIn(name, msg)
 
 
 if __name__ == "__main__":

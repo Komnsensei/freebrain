@@ -482,6 +482,9 @@ def format_probe(results):
             lines.append("  [%d] %-11s FAIL (%s) — %s%s"
                          % (i, r["name"], PROBE_VERDICTS.get(cls, cls),
                             r.get("error") or "", cooled))
+    benched = [r["name"] for r in results if not r.get("ok") and r.get("cooldown_s")]
+    if benched:
+        lines.append("benched until cooldown expires: %s" % ", ".join(benched))
     return "\n".join(lines)
 
 
@@ -493,9 +496,14 @@ def health_snapshot(config, env=None, now=None):
     for name in hops:
         remaining = cooldown_remaining(name, env, now)
         if remaining > 0:
+            hop_state = state.get(name) or {}
             cooling[name] = {
-                "remaining_s": remaining,
-                "class": (state.get(name) or {}).get("last_class"),
+                "class": hop_state.get("last_class"),
+                # `cooldown_s` is the REMAINING seconds, matching the ledger's
+                # recorded cascade block (p6-ledger.jsonl) — a hop's plain
+                # state field of the same name is the original bench length.
+                "cooldown_s": remaining,
+                "fails": int(hop_state.get("fails") or 0),
             }
     if not hops:
         status = "exhausted"
@@ -508,8 +516,36 @@ def health_snapshot(config, env=None, now=None):
     return {"status": status, "chain": hops, "cooling": cooling}
 
 
+def attribute(reply, entry, attempts=None):
+    """Attach serving-hop attribution to a reply (FREE-BRAIN.md §5).
+
+    The reply must say *who answered* (`provider`, `provider_url`, `model`) and
+    which credential served it (`provider_key` — the env var *name*, never the
+    value), plus the hops that failed first (`attempts`, one dict each, with the
+    failure class and cooldown). Without this a failover is invisible in the
+    record and a throughput number cannot be attributed to a backend, which is
+    exactly the evidence Q1's table needs. `call_one` returns a bare transport
+    dict, so the annotation has to happen here, at the one place that knows the
+    entry that served.
+    """
+    if not isinstance(reply, dict):
+        return reply
+    out = dict(reply)
+    out["provider"] = entry["name"]
+    out["provider_url"] = entry.get("url") or ""
+    out["model"] = entry.get("model") or ""
+    key_var = entry.get("key_var") or ("LOCAL_MODEL_URL" if entry.get("local") else "")
+    if key_var:
+        out["provider_key"] = key_var
+    out["attempts"] = list(attempts or [])
+    return out
+
+
 def run_cascade(entries, call_one, env=None, discover=None, on_event=None):
     env = _env(env)
+    if not entries:
+        raise RuntimeError("no providers configured — the chain is empty "
+                           "(check BRAIN_CASCADE / BRAIN_PROVIDERS and provider keys)")
     attempts = []
     for entry in entries:
         name = entry["name"]
@@ -519,12 +555,18 @@ def run_cascade(entries, call_one, env=None, discover=None, on_event=None):
             note_success(name, env)
             if on_event:
                 on_event("ok", entry, "")
-            return reply
+            return attribute(reply, entry, attempts)
         except RuntimeError as e:
             cls = classify(e)
             if cls == "model-missing" and discover is not None:
                 new_model = refresh_model(entry, discover)
                 if new_model and new_model != model:
+                    # Record the retired attempt: it is real evidence (the hop
+                    # answered 404, not the network) and a run that recovered
+                    # must still show why it retried. Not benched — a retired
+                    # model is not the provider's health.
+                    attempts.append({"provider": name, "class": cls,
+                                     "error": str(e)[:120], "cooldown_s": 0})
                     print("[brain] %s: model %r was retired — re-discovered %r and recovered"
                           % (name, model, new_model), file=sys.stderr)
                     entry = dict(entry, model=new_model)
@@ -533,15 +575,17 @@ def run_cascade(entries, call_one, env=None, discover=None, on_event=None):
                         note_success(name, env)
                         if on_event:
                             on_event("ok", entry, "")
-                        return reply
+                        return attribute(reply, entry, attempts)
                     except RuntimeError as e2:
                         e = e2
                         cls = classify(e2)
             cd = note_failure(name, e, env)
-            attempts.append("%s[%s]: %s" % (name, cls, str(e)[:120]))
+            attempts.append({"provider": name, "class": cls,
+                             "error": str(e)[:120], "cooldown_s": cd})
             print("[brain] %s failed (%s) — cooling down %ss, next provider"
                   % (name, cls, cd), file=sys.stderr)
             if on_event:
                 on_event("fail", entry, str(e))
-    detail = "; ".join(attempts)[:800]
+    detail = "; ".join("%s[%s]: %s" % (a["provider"], a["class"], a["error"])
+                       for a in attempts)[:800]
     raise RuntimeError("brain cascade exhausted (%d providers): %s" % (len(attempts), detail))

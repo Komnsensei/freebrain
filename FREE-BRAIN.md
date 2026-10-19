@@ -480,6 +480,11 @@ The brief ships a Python sketch (`FreeBrainConfig`, `FreebuffAgentBuilder` with
 
 ### 6.1 The tool-chain contract (replaces the stub's substring check)
 
+**Status (2026-10-07): implemented.** The schema gate, static analysis, the
+sandboxed runner, the verify step and the promotion record live in `toolchain.py`
+behind the `run_toolchain` tool; the design and its measured limits are in
+`PLAN-P1.md`. The contract below is what the code enforces, not a target.
+
 ```jsonc
 {
   "task": "string — the goal this tool-chain serves (goes to the ledger)",
@@ -504,6 +509,14 @@ generate (volatile)
   → verify output           (exit code + declared artifact shape + golden assertions)
   → promote to invariant    (ledger entry with howVerified: "gateChain")
 ```
+
+**Status (2026-10-07): implemented** (`toolchain.py`, `toolchain_test.py` — 30
+tests). One deviation from the sketch above, recorded rather than glossed: the
+first backend is stdlib `RlimitRunner`, not a Rust guard, and the Docker/seccomp
+runner is deferred to P3 behind the same `run_manifest(runner=…)` seam. The
+enforcement strength per bound — kernel rlimit vs parent-side poll vs import
+blocklist — is a truth table in `PLAN-P1.md`; the run record names the mechanism
+(`memory_enforcement`, `network_enforcement`) instead of implying a guarantee.
 
 Failure at any step returns a **structured failure** (`[gate-failed]
 step=… reason=…`) and feeds the breaker counters — never raw failed output for the
@@ -716,6 +729,12 @@ harness's quality.
 writes. The loop's tools are read-only by construction, so the completion gate has
 never had to verify a change to the world — only a fact about it.
 
+**Update (2026-10-07).** The action plane now exists (`toolchain.py`,
+`run_toolchain`), so the gate *can* verify a change to the world. The paragraph
+above still holds for this suite: the codegen tasks that would drive it are not
+wired into `autonomy_suite.py` yet, so Q2/Q3 remain instruments rather than
+results. That gap is P2 in `PLAN-P1.md`.
+
 ### The Free Brain test suite (fixed before P1 ships)
 
 | Suite | Measures | Pass condition |
@@ -737,6 +756,19 @@ The brief's own next actions, and the phases that deliver them:
 | --- | --- | --- |
 | Integrate real-time containerized Docker endpoints for live code execution | **P1** — Rust guard + Docker runtime (Python3 only first) | Escape suite green; Test 1 caps enforced by the guard, not the model |
 | Implement persistent vector memory indexing for cross-session agent learning | **P4** — offline memory/ledger persistence | Cross-session recall works offline; nothing unverified is ever labeled fact |
+
+**Status of the P1/P2 boundary (2026-10-07).** The manifest contract and gate chain
+(§6.1/§6.2) are built and tested on a stdlib backend — `toolchain.py` +
+`toolchain_test.py`, 30 tests, and the escape/manifest-fuzz sets are the Q2/Q3
+instruments. What is *not* done from the P1 row is the Docker/seccomp runtime (the
+Rust guard is not required for parity here); what is *not* done from the P2 row is
+model-emitted tool-chains completing the 20 curated tasks, which needs the codegen
+tasks wired into the goal-audit suite. Neither is claimed as done. See `PLAN-P1.md`.
+
+Name check while writing that note: §8.2 cites `autonomy_suite.py` for its
+eight-floor report, but no such file is in the repo — the runnable goal-audit
+instrument is `loop_audit.py --goals`, and it reports a different table. Recorded
+as doc drift, not repaired here; the §8.2 floors currently have no producer.
 
 Full sequencing (every phase ends runnable and independently testable):
 
