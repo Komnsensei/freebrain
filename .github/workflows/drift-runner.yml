@@ -104,8 +104,8 @@ jobs:
           export LOCAL_MODEL="$MODEL"
           export DRIVE_RESIDENCE=freebrain-residence
           export BRAIN_CASCADE=0   # P6 is the zero-API-calls configuration
-          python3 -u drift_loop.py --cycles "$CYCLES" --max-seconds "$MAX_SECONDS"
-          CODE=$?
+          CODE=0
+          python3 -u drift_loop.py --cycles "$CYCLES" --max-seconds "$MAX_SECONDS" || CODE=$?
           echo "loop exit code: $CODE"
           echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
           # 0 = complete or clean stop on budget · 2 = breaker trip · 3 = Test 2
