@@ -85,6 +85,29 @@ def openapi_spec(host: str):
         },
         "servers": [{"url": base}],
         "paths": {
+            "/api/video/generate": {
+                "post": {
+                    "operationId": "generateVideo",
+                    "summary": "Submit one durable video job to AI Creative Studio",
+                    "parameters": [
+                        {"name": "X-FreeBrain-Video-Token", "in": "header", "required": True, "schema": {"type": "string"}},
+                        {"name": "X-Idempotency-Key", "in": "header", "required": True, "schema": {"type": "string", "maxLength": 200}}
+                    ],
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "provider": {"type": "string", "default": "video-cascade"}, "duration_seconds": {"type": "integer", "default": 4}, "aspect_ratio": {"type": "string", "default": "16:9"}, "resolution": {"type": "string", "default": "720p"}, "fps": {"type": "integer", "default": 12}}, "required": ["prompt"]}}}},
+                    "responses": {"202": {"description": "Durable job accepted by Creative Studio"}, "401": {"description": "Missing/invalid FreeBrain access token"}, "503": {"description": "Bridge or real renderer is not configured"}}
+                }
+            },
+            "/api/video/jobs/{job_id}": {
+                "get": {
+                    "operationId": "getVideoJob",
+                    "summary": "Read durable video job status from AI Creative Studio",
+                    "parameters": [
+                        {"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "X-FreeBrain-Video-Token", "in": "header", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"200": {"description": "Current durable job state"}, "401": {"description": "Missing/invalid FreeBrain access token"}, "502": {"description": "Studio unavailable"}}
+                }
+            },
             "/api/search": {
                 "post": {
                     "operationId": "search",
