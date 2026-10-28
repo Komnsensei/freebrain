@@ -543,6 +543,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": type(e).__name__, "reason": str(e)}, 500)
 
+        # --- durable video job status (FreeBrain -> AI Creative Studio) ---
+        if path.startswith("/api/video/jobs/"):
+            try:
+                import agent_runtime
+                agent_runtime.load_env_file()
+                from integrations import video_bridge
+                video_bridge.authorize(self.headers.get("X-FreeBrain-Video-Token"))
+                job_id = path[len("/api/video/jobs/"):].strip("/")
+                return self._json({"ok": True, "job": video_bridge.get_video_job(job_id)})
+            except Exception as e:
+                status = getattr(e, "status", 502)
+                return self._json({"ok": False, "error": type(e).__name__, "reason": str(e)}, status)
+
         if path == "/api/health":
             try:
                 idx = index_status()
@@ -598,6 +611,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        # --- durable video dispatch (FreeBrain -> AI Creative Studio) ---
+        if path == "/api/video/generate":
+            try:
+                import agent_runtime
+                agent_runtime.load_env_file()
+                from integrations import video_bridge
+                video_bridge.authorize(self.headers.get("X-FreeBrain-Video-Token"))
+                body = self._read_json()
+                idempotency_key = self.headers.get("X-Idempotency-Key", "")
+                result = video_bridge.submit_video(body, idempotency_key)
+                return self._json({"ok": True, "job": result}, 202)
+            except Exception as e:
+                status = getattr(e, "status", 502)
+                return self._json({"ok": False, "error": type(e).__name__, "reason": str(e)}, status)
 
         # --- search (plugin indexing) ---
         if path in ("/api/search", "/api/index/search"):
