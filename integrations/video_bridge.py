@@ -39,8 +39,11 @@ def _studio_request(method: str, path: str, payload: dict | None = None,
                     idempotency_key: str | None = None) -> dict:
     base = os.environ.get("FREEBRAIN_VIDEO_STUDIO_URL", "http://127.0.0.1:8000").strip().rstrip("/")
     tenant_token = _required_env("FREEBRAIN_VIDEO_STUDIO_TOKEN")
-    if not base.startswith(("http://127.0.0.1", "http://localhost", "https://")):
-        raise VideoBridgeError("video Studio URL must be localhost or HTTPS", 503)
+    parsed_base = urllib.parse.urlparse(base)
+    is_local_http = parsed_base.scheme == "http" and parsed_base.hostname in ("127.0.0.1", "localhost", "::1")
+    is_https = parsed_base.scheme == "https" and bool(parsed_base.hostname)
+    if not (is_local_http or is_https):
+        raise VideoBridgeError("video Studio URL must be localhost HTTP or HTTPS", 503)
     body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
     headers = {"Authorization": "Bearer " + tenant_token, "Accept": "application/json"}
     if body is not None:
@@ -78,7 +81,7 @@ def submit_video(payload: dict, idempotency_key: str) -> dict:
         "provider": payload.get("provider", "video-cascade"),
         "duration_seconds": payload.get("duration_seconds", 4),
         "aspect_ratio": payload.get("aspect_ratio", "16:9"),
-        "resolution": payload.get("resolution", "576p"),
+        "resolution": payload.get("resolution", "720p"),
         "fps": payload.get("fps", 12),
     }
     for key in ("negative_prompt", "shots", "model"):
