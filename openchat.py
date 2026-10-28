@@ -85,6 +85,29 @@ def openapi_spec(host: str):
         },
         "servers": [{"url": base}],
         "paths": {
+            "/api/video/generate": {
+                "post": {
+                    "operationId": "generateVideo",
+                    "summary": "Submit one durable video job to AI Creative Studio",
+                    "parameters": [
+                        {"name": "X-FreeBrain-Video-Token", "in": "header", "required": True, "schema": {"type": "string"}},
+                        {"name": "X-Idempotency-Key", "in": "header", "required": True, "schema": {"type": "string", "maxLength": 200}}
+                    ],
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "provider": {"type": "string", "default": "video-cascade"}, "duration_seconds": {"type": "integer", "default": 4}, "aspect_ratio": {"type": "string", "default": "16:9"}, "resolution": {"type": "string", "default": "720p"}, "fps": {"type": "integer", "default": 12}}, "required": ["prompt"]}}}},
+                    "responses": {"202": {"description": "Durable job accepted by Creative Studio"}, "401": {"description": "Missing/invalid FreeBrain access token"}, "503": {"description": "Bridge or real renderer is not configured"}}
+                }
+            },
+            "/api/video/jobs/{job_id}": {
+                "get": {
+                    "operationId": "getVideoJob",
+                    "summary": "Read durable video job status from AI Creative Studio",
+                    "parameters": [
+                        {"name": "job_id", "in": "path", "required": True, "schema": {"type": "string"}},
+                        {"name": "X-FreeBrain-Video-Token", "in": "header", "required": True, "schema": {"type": "string"}}
+                    ],
+                    "responses": {"200": {"description": "Current durable job state"}, "401": {"description": "Missing/invalid FreeBrain access token"}, "502": {"description": "Studio unavailable"}}
+                }
+            },
             "/api/search": {
                 "post": {
                     "operationId": "search",
@@ -543,6 +566,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "error": type(e).__name__, "reason": str(e)}, 500)
 
+        # --- durable video job status (FreeBrain -> AI Creative Studio) ---
+        if path.startswith("/api/video/jobs/"):
+            try:
+                import agent_runtime
+                agent_runtime.load_env_file()
+                from integrations import video_bridge
+                video_bridge.authorize(self.headers.get("X-FreeBrain-Video-Token"))
+                job_id = path[len("/api/video/jobs/"):].strip("/")
+                return self._json({"ok": True, "job": video_bridge.get_video_job(job_id)})
+            except Exception as e:
+                status = getattr(e, "status", 502)
+                return self._json({"ok": False, "error": type(e).__name__, "reason": str(e)}, status)
+
         if path == "/api/health":
             try:
                 idx = index_status()
@@ -598,6 +634,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        # --- durable video dispatch (FreeBrain -> AI Creative Studio) ---
+        if path == "/api/video/generate":
+            try:
+                import agent_runtime
+                agent_runtime.load_env_file()
+                from integrations import video_bridge
+                video_bridge.authorize(self.headers.get("X-FreeBrain-Video-Token"))
+                body = self._read_json()
+                idempotency_key = self.headers.get("X-Idempotency-Key", "")
+                result = video_bridge.submit_video(body, idempotency_key)
+                return self._json({"ok": True, "job": result}, 202)
+            except Exception as e:
+                status = getattr(e, "status", 502)
+                return self._json({"ok": False, "error": type(e).__name__, "reason": str(e)}, status)
 
         # --- search (plugin indexing) ---
         if path in ("/api/search", "/api/index/search"):
