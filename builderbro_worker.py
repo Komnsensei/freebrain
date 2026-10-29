@@ -68,7 +68,7 @@ def call_tool(
     builderbro_root: str | None = None,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     environ: Mapping[str, str] | None = None,
-    runner=subprocess.run,
+    runner=None,
 ) -> dict:
     env = os.environ if environ is None else environ
     if tool not in ALLOWED_TOOLS:
@@ -83,7 +83,11 @@ def call_tool(
             raise WorkerError("this zero-cost worker permits only extractive RAG; live generation is disabled")
 
     root = resolve_builderbro_root(builderbro_root, env)
-    payload = json.dumps(dict(arguments), ensure_ascii=False, separators=(",", ":"))
+    try:
+        payload = json.dumps(dict(arguments), ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise WorkerError("tool arguments must be JSON-serializable") from exc
+    runner = runner or subprocess.run
     command: Sequence[str] = (
         sys.executable, str(root / "builderbro_mcp.py"),
         "--call", tool, "--json", payload,
