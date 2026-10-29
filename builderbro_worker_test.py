@@ -47,7 +47,7 @@ class BuilderBroWorkerTests(unittest.TestCase):
             self.assertFalse(kwargs["shell"])
             self.assertEqual(kwargs["cwd"], str(self.root))
             self.assertNotIn("GROQ_API_KEY", kwargs["env"])
-            self.assertEqual(command[2:5], [str(self.root / "builderbro_mcp.py"), "--call", "verify_claim"])
+            self.assertEqual(command[1:4], [str(self.root / "builderbro_mcp.py"), "--call", "verify_claim"])
             return type("Completed", (), {
                 "stdout": json.dumps({"ok": True, "level": "observed"}),
                 "stderr": "",
